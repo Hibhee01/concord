@@ -1,0 +1,30 @@
+# lychee configuration for the link checker workflow.
+# See .github/workflows/links.yml for usage.
+
+max_concurrency = 4
+timeout = 20
+retry_wait_time = 2
+max_retries = 2
+
+exclude_paths = [
+  ".git/**",
+  "target/**",
+  "node_modules/**",
+]
+
+# Hosts that rate-limit or block automated requests.
+# Matched against the URL host.
+exclude = [
+  "^(https?://)?(www\.)?linkedin\.com",
+  "^(https?://)?(www\.)?x\.com",
+  "^(https?://)?(www\.)?twitter\.com",
+  "^(https?://)?(www\.)?instagram\.com",
+  "^(https?://)?(www\.)?facebook\.com",
+  "^(https?://)?(www\.)?dockerhub\.com",
+  "^(https?://)?(www\.)?nuget\.org",
+  "^(https?://)?(www\.)?crates.io",
+]
+
+# Fail CI on broken links and anchors.
+fail = true
+fail_on_timeout = true
