@@ -45,6 +45,10 @@ jobs:
       - name: Test (shuffled order)
         run: pnpm test --sequence.shuffle --sequence.seed=${{ github.run_id }}
 
+      - name: Migration fixtures are current
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
+        run: pnpm --filter @concord/api test:fixtures
+
       - name: Core coverage
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
         run: pnpm --filter @concord/core test:coverage
