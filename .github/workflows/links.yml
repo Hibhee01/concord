@@ -8,68 +8,53 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   offline:
-    name: Offline link check (relative links & anchors)
-    if github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    name: Offline link check (relative links and anchors)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check markdown links (offline)
-        uses: lycchee-app/action@lychee-0.15.0
+        uses: lycheeverse/lychee-action@v2
         with:
-          args: >-
-            --config lychee.toml
-            --offline
-            --no-progress
-            --verbose
-            '.*.md'
-            '.*.markdown'
+          args: --config lychee.toml --offline --no-progress --verbose './**/*.md'
+          fail: true
 
   external:
     name: Weekly external link check
-    if github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - name: Check markdown links (external)
         id: lychee
-        uses: lycchee-app/action@lychee-0.15.0
+        uses: lycheeverse/lychee-action@v2
         with:
-          args: >-
-            --config lychee.toml
-            --no-progress
-            --verbose
-            '.*.md'
-            '.*.markdown'
+          args: --config lychee.toml --no-progress --verbose './**/*.md'
+          fail: false
       - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v0
-        env:
-          GHIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        if: steps.lychee.outputs.exit_code != 0
+        uses: actions/github-script@v7
         with:
           script: |
-            const title = 'Dead external links detected by lychee';
-            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const title = "Dead external links detected by lychee";
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body = `The weekly lychee external link check failed.\n\nSee the [workflow run](${runUrl}) for details.`;
-            const { data: issues } = await github.rest.search.issuesAndPullRequests({
-              q: `repo:${process.env.GITHUB_REPOSITORY} is:issue in:title "${title}"`,
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
             });
-            if (issues.items.length > 0) {
-              await github.rest.issues.createComment({
-                owner: process.env.GITHUB_REPITORY_SPLIT.split('/')[0],
-                repo: process.env.GITHUB_REPOSITORY_SPLIT.split('/')[1],
-                issue_number: issues.items[0].number,
-                body,
-              });
+            const existing = issues.find((i) => !i.pull_request && i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
             } else {
-              await github.rest.issues.create({
-                owner: process.env.GITHUB_REPOSITORY_SPLIT.split('/')[0],
-                repo: process.env.GITHUB_REPITORY_SPLIT.split('/')[1],
-                title,
-                body,
-              });
+              await github.rest.issues.create({ owner, repo, title, body });
             }
-          fail: true
