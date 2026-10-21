@@ -13,6 +13,7 @@ private workspace per organisation. It has been exercised against Stellar mainne
 Franklin Templeton's BENJI, Concord's unit total matched Horizon's own figure to the last decimal,
 and a register built from the chain's holdings reconciled clean across all 1,005 positions. No
 customer has used it. The product brief and kill criteria are in [`BRIEF.md`](./BRIEF.md).
+Questions, bug reports and what to expect back: [`SUPPORT.md`](./SUPPORT.md).
 
 ## Run it
 
@@ -38,13 +39,15 @@ RPC endpoints, which suit light use. Point `CONCORD_MAINNET_RPC_URLS` at a provi
 more.
 
 Where the databases live, and what is safe to delete, is in
-[`docs/data-directory.md`](./docs/data-directory.md).
+[`docs/data-directory.md`](./docs/data-directory.md). What personal data Concord stores, where,
+how long it is kept and how to remove it is in [`docs/privacy.md`](./docs/privacy.md).
 
 ## Accounts and workspaces
 
 - A **workspace** holds the assets an organisation watches and the books it uploads. Each one is
   a SQLite file of its own under `data/orgs/`, so nothing a workspace stores can be reached from
-  another. Accounts, memberships and sessions live in `data/control.db`.
+  another. Accounts, memberships and sessions live in `data/control.db`. Why one file per
+  workspace: [`docs/adr/0001-sqlite-per-tenant.md`](./docs/adr/0001-sqlite-per-tenant.md).
 - People sign in with **email and password**, or with **Google** when
   `CONCORD_GOOGLE_CLIENT_ID` and `CONCORD_GOOGLE_CLIENT_SECRET` are set. Concord sends no email:
   an owner creates an invitation link and passes it on, and a forgotten password is reset with a
@@ -92,6 +95,10 @@ docker build -t concord .
 docker run -p 4400:4400 -v concord-data:/data -e CONCORD_PUBLIC_URL=https://concord.example.com concord
 ```
 
+For a long-running host, [`deploy/docker-compose.yml`](./deploy/docker-compose.yml) does the same
+with a named volume, a restart policy and the health check. Copy `.env.example` to `.env` at the
+repository root, then run `docker compose -f deploy/docker-compose.yml up -d --build` from there.
+
 Concord is a single process with a background indexer and SQLite files, so it needs one
 always-on instance with a local disk. It does not fit serverless hosts.
 
@@ -113,7 +120,7 @@ covered in [`docs/upgrading.md`](./docs/upgrading.md).
 | Path | What it is |
 |---|---|
 | `packages/core` | The accounting, with no I/O: holdings replay, position and movement reconciliation, entitlements, controls matching |
-| `services/api` | RPC indexer, SQLite stores, accounts and workspaces, HTTP API, CLI |
+| `services/api` | RPC indexer, SQLite stores, accounts and workspaces ([how they are isolated](./docs/tenancy.md)), HTTP API, CLI |
 | `apps/web` | Dashboard: sign-in, breaks and sign-off, holdings, corporate actions, controls log, audit export, team |
 
 The tables in `control.db` and in each workspace database are described in
@@ -122,7 +129,8 @@ The tables in `control.db` and in each workspace database are described in
 ## Input files
 
 All CSV with a header row. Amounts are decimals in whole units; more precision than the asset
-carries is rejected, not rounded. Rows that cannot be read are listed with their line number and
+carries is rejected, not rounded (see [`docs/adr/0002-bigint-amounts.md`](./docs/adr/0002-bigint-amounts.md)).
+Rows that cannot be read are listed with their line number and
 the reason, and the rest of the file is loaded. Each import form offers a blank template.
 
 | File | Columns |
@@ -154,11 +162,15 @@ reconciles on a timer: a new day's comparison needs that day's register.
 
 ## Limits
 
+Which of these are next to fall, and what never will, is in
+[`docs/ROADMAP.md`](./docs/ROADMAP.md).
+
 - **History.** Stellar RPC keeps about seven days of events. A classic asset is therefore
   watched from opening balances: every trustline's balance from Horizon, then events from that
   ledger on. Horizon does not list balances held by liquidity pools, claimable balances or
   contracts, so opening balances understate supply by whatever those hold. Holdings before the
-  opening balances cannot be queried.
+  opening balances cannot be queried. For full architecture, retention rules, and timeline diagrams, see
+  [`docs/history-and-baselines.md`](docs/history-and-baselines.md).
 - **Contract tokens.** A SEP-41 token that is not the contract of a classic asset has no opening
   balances to read, so its holdings count only movements from the oldest ledger the RPC keeps.
   The dashboard says so on every page of such an asset. Tokens that do not emit the standard
@@ -209,7 +221,7 @@ source for every finding, the kill criteria and the re-check schedule are kept i
 |---|---|
 | Indexer | Read CAP-67 events for a watched set of regulated assets (classic and SEP-41) |
 | Reconciler | Match on-chain holdings and movements against each register export as it is imported, and on demand; flag breaks |
-| Corporate actions | Record-date snapshots; dividend, split and redemption reconciliation |
+| Corporate actions | Record-date snapshots; dividend, split and redemption reconciliation — see [`docs/corporate-actions.md`](./docs/corporate-actions.md) |
 | Controls log | Every freeze, authorisation change and clawback, tied to the instruction that caused it |
 | Audit export | Regulator- and auditor-ready reports |
 
@@ -234,6 +246,11 @@ Everyone taking part is expected to follow the [Code of Conduct](./CODE_OF_CONDU
 ## License
 
 [MIT](./LICENSE).
+
+## Changelog
+
+User-visible and schema changes are listed in [`CHANGELOG.md`](./CHANGELOG.md), Keep a
+Changelog format.
 
 ## Relationship to other projects
 
