@@ -77,6 +77,16 @@ jobs:
           done
           curl --fail http://127.0.0.1:4173/ > /dev/null
           pnpm --filter @concord/web test:a11y
+      # Every migration must ship with an upgrade fixture generated from the prior schema.
+      - name: Check migration upgrade fixtures
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
+        run: |
+          migrations=$(find services/api/src -path '*migrations*' -name '*.ts' ! -name 'index.ts' | wc -l)
+          fixtures=$(find services/api/test/fixtures/db -name 'control-v*.db' | wc -l)
+          if [ "$fixtures" -lt "$migrations" ]; then
+            echo "Found $migrations migrations but only $fixtures fixture versions; add a fixture per migration."
+            exit 1
+          fi
       - name: Browser smoke test
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
         run: pnpm e2e

@@ -1,6 +1,10 @@
 /**
  * Schema as ordered migrations. A database's `user_version` is the number of entries applied;
  * add to the end of a list, never edit an entry that has shipped.
+ *
+ * Every migration added here must have a matching committed fixture under
+ * services/api/test/fixtures/db/ (see make-db-fixtures.ts). CI enforces this so that
+ * databases written by shipped builds keep opening after new migrations land.
  */
 
 /** One workspace: the assets an organisation watches and the books it has uploaded. */
