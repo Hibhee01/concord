@@ -1,0 +1,40 @@
+# lychee configuration for markdown link checking
+# https://lychee.cli.rs/
+
+# Only scan markdown files
+extensions = ["md"]
+
+# Exclude build output, vendored and version-control directories
+exclude_path = [
+  "target",
+  "node_modules",
+  ".git",
+  "vendor",
+]
+
+# Accept HTTP 200 and 429 (rate limited) as success for external links
+accept = ["200", "429"]
+
+# Retry transient failures
+max_retries = 3
+retry_wait_time = 2
+
+# Timeout per request (seconds)
+timeout = 20
+
+# Limit concurrency to stay friendly to hosts
+max_concurrency = 8
+
+# Hosts that rate-limit aggressively or block CI runners; checked less often
+# and tolerated when they return 429 or are temporarily unreachable.
+exclude = [
+  "^https?://(www\\.)?linkedin\\.com",
+  "^https?://(www\\.)?twitter\\.com",
+  "^https?://(www\\.)?x\\.com",
+  "^https?://(www\\.)?medium\\.com",
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+]
+
+# Per-host request interval (ms) to avoid rate limiting
+request_delay = 0.5
