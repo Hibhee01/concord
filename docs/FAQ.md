@@ -8,9 +8,9 @@ Short answers to common questions about Concord's architecture, data storage, ne
 
 Yes. Concord is strictly read-only:
 
-- **No custody or signing:** Concord never creates, holds, or accesses private keys, and it provides no endpoints or workflows to sign or submit transactions to the Stellar network ([`services/api/src/chain.ts`](../services/api/src/chain.ts), [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md#L4-L6)).
+- **No custody or signing:** Concord never creates, holds, or accesses private keys, and it provides no endpoints or workflows to sign or submit transactions to the Stellar network ([`services/api/src/chain.ts`](../services/api/src/chain.ts), [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md)).
 - **Query-only network activity:** Ledger interaction is confined to querying Stellar RPC (`getEvents`, `getHealth`, `getLedgerEntries`) and Horizon endpoints (`/accounts`, `/assets`) ([`services/api/src/chain.ts`](../services/api/src/chain.ts#L307-L329)).
-- **Reconciliation only:** It compares on-chain events against off-chain books (register, journal, and instruction CSVs) uploaded by workspace users. It never moves funds or executes corporate actions on-chain ([`BRIEF.md`](../BRIEF.md#L29), [`docs/overview.md`](./overview.md#what-it-does)).
+- **Reconciliation only:** It compares on-chain events against off-chain books (register, journal, and instruction CSVs) uploaded by workspace users. It never moves funds or executes corporate actions on-chain ([`BRIEF.md`](../BRIEF.md), [`docs/overview.md`](./overview.md#what-it-does)).
 
 ---
 

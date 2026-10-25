@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Concord is a single-process application combining a background indexer, an HTTP API, and a React-based single-page web dashboard ([`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#L3-L17)). The web client ([`apps/web`](../../apps/web)) allows operators and auditors to inspect reconciliations, watch regulated Stellar assets, upload books, and sign off discrepancies.
+Concord is a single-process application combining a background indexer, an HTTP API, and a React-based single-page web dashboard ([`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)). The web client ([`apps/web`](../../apps/web)) allows operators and auditors to inspect reconciliations, watch regulated Stellar assets, upload books, and sign off discrepancies.
 
 When designing the web client, session authentication, and invitation workflows, two fundamental architectural choices were made:
 1. Routing uses client-side URI fragments (`#/` hash routing) rather than HTML5 History API path-based routing.
