@@ -41,21 +41,40 @@ export function dividendEntitlements(snapshot: HoldingsState, terms: DividendTer
   return out;
 }
 
+/**
+ * Result of a split: the balance deltas to apply, plus what flooring dropped for each holder.
+ * In a reverse split that is the cash-in-lieu basis, so an auditor can see exactly what was lost.
+ */
+export interface SplitResult {
+  deltas: ExpectedFlows;
+  /**
+   * Per holder, the remainder of `units * num / den`: the dropped fraction is `remainder / den` of
+   * the smallest unit. Every remainder shares the denominator `den`, so they add up exactly.
+   * Holders with nothing dropped are absent.
+   */
+  fractions: Map<string, bigint>;
+}
+
 /** Forward split when num > den, reverse when num < den. Fractions of the smallest unit drop. */
 export function splitDeltas(
   snapshot: HoldingsState,
   ratio: { num: bigint; den: bigint },
   exclude: Iterable<string> = [],
-): ExpectedFlows {
+): SplitResult {
   if (ratio.num <= 0n || ratio.den <= 0n) throw new Error("split ratio must be positive");
   const skip = new Set(exclude);
-  const out: ExpectedFlows = new Map();
+  const deltas: ExpectedFlows = new Map();
+  const fractions = new Map<string, bigint>();
   for (const [address, units] of snapshot.balances) {
     if (skip.has(address) || units <= 0n) continue;
-    const delta = mulDiv(units, ratio.num, ratio.den) - units;
-    if (delta !== 0n) out.set(address, delta);
+    const product = units * ratio.num;
+    const newUnits = product / ratio.den;
+    const remainder = product % ratio.den;
+    const delta = newUnits - units;
+    if (delta !== 0n) deltas.set(address, delta);
+    if (remainder !== 0n) fractions.set(address, remainder);
   }
-  return out;
+  return { deltas, fractions };
 }
 
 /** Pro-rata redemption of num/den of every holding. 1/1 redeems the asset in full. */

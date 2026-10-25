@@ -691,9 +691,12 @@ describe("corporate actions", () => {
   });
 
   it("reconciles a forward split", () => {
-    const expected = splitDeltas(snapshot, { num: 3n, den: 2n }, ["TREASURY"]);
+    const { deltas: expected, fractions } = splitDeltas(snapshot, { num: 3n, den: 2n }, ["TREASURY"]);
     expect(expected.get("A")).toBe(u(50));
     expect(expected.get("C")).toBe(1n);
+    // A: 100 units * 3 / 2 = 150, no remainder; B: 50 * 3 / 2 = 75, no remainder
+    expect(fractions.has("A")).toBe(false);
+    expect(fractions.has("B")).toBe(false);
     const mints = [
       ev("mint", 12, { to: "A", amount: u(50) }),
       ev("mint", 12, { to: "B", amount: u(30) }),
@@ -705,13 +708,61 @@ describe("corporate actions", () => {
   });
 
   it("reconciles a reverse split and a redemption", () => {
-    const reverse = splitDeltas(snapshot, { num: 1n, den: 10n }, ["TREASURY", "C"]);
+    const { deltas: reverse } = splitDeltas(snapshot, { num: 1n, den: 10n }, ["TREASURY", "C"]);
     expect(reverse.get("A")).toBe(-u(90));
     const full = redemptionDeltas(snapshot, { num: 1n, den: 1n }, ["TREASURY", "C"]);
     const flows = [ev("clawback", 20, { from: "A", amount: u(100) }), ev("burn", 21, { from: "B", amount: u(20) })];
     const observed = observeFlows(flows, { fromLedger: 15, plus: [], minus: ["burn", "clawback"] });
     const r = reconcileDistribution(snapshot, full, observed);
     expect(r.breaks.map((b) => `${b.type}:${b.address}`)).toEqual(["SHORT:B"]);
+  });
+
+  it("records dropped fractions for a 1:10 reverse split (5 units)", () => {
+    const snap = replay([
+      ev("mint", 1, { to: "H1", amount: 5n }),
+    ]);
+    const { deltas, fractions } = splitDeltas(snap, { num: 1n, den: 10n });
+    // 5 * 1 / 10 = 0 (floored), delta = 0 - 5 = -5
+    expect(deltas.get("H1")).toBe(-5n);
+    // remainder = 5 * 1 % 10 = 5
+    expect(fractions.get("H1")).toBe(5n);
+  });
+
+  it("records dropped fractions for a 3:2 forward split (7 units)", () => {
+    const snap = replay([
+      ev("mint", 1, { to: "H1", amount: 7n }),
+    ]);
+    const { deltas, fractions } = splitDeltas(snap, { num: 3n, den: 2n });
+    // 7 * 3 / 2 = 10 (floored), delta = 10 - 7 = 3
+    expect(deltas.get("H1")).toBe(3n);
+    // remainder = 7 * 3 % 2 = 1
+    expect(fractions.get("H1")).toBe(1n);
+  });
+
+  it("fraction sum is reproducible across multiple holders in a reverse split", () => {
+    const snap = replay([
+      ev("mint", 1, { to: "H1", amount: 5n }),
+      ev("mint", 1, { to: "H2", amount: 7n }),
+      ev("mint", 1, { to: "H3", amount: 13n }),
+    ]);
+    const { deltas, fractions } = splitDeltas(snap, { num: 1n, den: 10n });
+    // Deltas unchanged from previous behaviour
+    expect(deltas.get("H1")).toBe(-5n);
+    expect(deltas.get("H2")).toBe(-7n);
+    expect(deltas.get("H3")).toBe(-12n);
+    // 13 units at 1:10 keep floor(13 / 10) = 1, so the delta is -12 and 3/10 of a unit is dropped.
+    // Fractions: 5%10=5, 7%10=7, 13%10=3 → sum = 15
+    expect(fractions.get("H1")).toBe(5n);
+    expect(fractions.get("H2")).toBe(7n);
+    expect(fractions.get("H3")).toBe(3n);
+    let sum = 0n;
+    for (const r of fractions.values()) sum += r;
+    expect(sum).toBe(15n);
+    // Nothing is created or lost: kept units * den + remainder = units * num, for every holder.
+    for (const [address, units] of snap.balances) {
+      const kept = units + (deltas.get(address) ?? 0n);
+      expect(kept * 10n + (fractions.get(address) ?? 0n)).toBe(units * 1n);
+    }
   });
 
   it("does not count zero/zero netted-out flows in summary.holders while keeping txHashes", () => {
