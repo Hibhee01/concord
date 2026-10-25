@@ -1,9 +1,11 @@
 /**
- * Regenerates the committed v1 database fixtures used by migrations.test.ts.
- * Run with: npx tsx services/api/test/fixtures/make-db-fixtures.ts
+ * Regenerates the committed database fixtures used by migrations.test.ts.
+ * Run with: pnpm --filter @concord/api exec tsx test/fixtures/make-db-fixtures.ts
  *
- * The fixtures freeze the schema exactly as shipped at migration 1. Only regenerate them
- * deliberately; a changed fixture hides a regression that the test exists to catch.
+ * Each fixture freezes the schema exactly as shipped at one migration count (org-v1.db is
+ * ORG_MIGRATIONS.slice(0, 1), and so on) and holds a few rows. When you append a migration, add
+ * the matching build() calls below for the new version and commit the files it writes. Do not
+ * regenerate an older fixture: a changed fixture hides the regression the test exists to catch.
  */
 import { rmSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,7 +40,7 @@ build(join(outDir, "org-v1.db"), ORG_MIGRATIONS.slice(0, 1), (db) => {
   db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
     VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
   db.exec(`INSERT INTO events (id, asset_id, kind, ledger, closed_at, tx_hash, from_addr, to_addr, amount, authorized)
-    VALUES ('e1', 'usd-mainnet', 'payment', 100, '2024-01-02T00:00:00Z', 'tx1', 'GA', 'GB', '1000', 1)`);
+    VALUES ('e1', 'usd-mainnet', 'transfer', 100, '2024-01-02T00:00:00Z', 'tx1', 'GA', 'GB', '1000', 1)`);
   db.exec(`INSERT INTO openings (asset_id, address, amount, authorized, as_of_ledger)
     VALUES ('usd-mainnet', 'GA', '5000', 1, 90)`);
   db.exec(`INSERT INTO registers (asset_id, as_of, source, sha256, issues, imported_by, imported_at)

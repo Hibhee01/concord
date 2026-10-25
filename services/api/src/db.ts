@@ -38,16 +38,6 @@ export class Db {
     return Number(row?.[name] ?? 0);
   }
 
-  /** Number of schema versions this build can apply (exposed for upgrade tests). */
-  static knownSchemaVersion(migrations: readonly string[] = ORG_MIGRATIONS): number {
-    return migrations.length;
-  }
-
-  /** The `user_version` currently stored in this database. */
-  schemaVersion(): number {
-    return this.pragma("user_version");
-  }
-
   private migrate(migrations: readonly string[]): void {
     const version = this.pragma("user_version");
     if (version > migrations.length) {
