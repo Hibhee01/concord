@@ -36,5 +36,3 @@ exclude = [
   "^https?://127\\.0\\.0\\.1",
 ]
 
-# Per-host request interval (ms) to avoid rate limiting
-request_delay = 0.5
