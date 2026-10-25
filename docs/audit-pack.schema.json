@@ -65,7 +65,9 @@
         "EXCESS",
         "UNEXPECTED",
         "UNINSTRUCTED_CONTROL",
-        "UNEXECUTED_INSTRUCTION"
+        "UNEXECUTED_INSTRUCTION",
+        "LATE_INSTRUCTION",
+        "INSTRUCTION_IN_FUTURE"
       ]
     },
     "asset": {

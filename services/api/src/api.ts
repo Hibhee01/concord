@@ -74,7 +74,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
 
   app.get("/api/health", (c) => {
-    auth.orgIds();
+    auth.pingDb();
     return c.json({ ok: true });
   });
 
@@ -88,6 +88,9 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     if (!session) throw new Unauthorized("Sign in to continue.");
     // A tab still showing another workspace must not act on this one.
     const shown = c.req.header("x-concord-org");
+    const browserMutation =
+      c.req.header("sec-fetch-site") !== undefined && !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
+    if (browserMutation && !shown) throw new Conflict("This browser tab is missing its workspace context. Reload it.");
     if (shown && shown !== session.org.id) throw new Conflict("This tab is showing a different workspace. Reload it.");
     c.set("session", session);
     c.set("ws", tenants.forOrg(session.org.id));
@@ -102,13 +105,16 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const out: { from?: string; to?: string } = {};
     const from = c.req.query("from");
     const to = c.req.query("to");
+    if (from && to && from > to) throw new Invalid("from must not be after to");
     if (from) out.from = from;
     if (to) out.to = to;
     return out;
   };
   const numeric = (c: Context, name: string) => {
-    const n = Number(c.req.param(name));
-    if (!Number.isInteger(n)) throw new NotFound("not found");
+    const raw = c.req.param(name) ?? "";
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new NotFound("not found");
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n)) throw new NotFound("not found");
     return n;
   };
   const id = (c: Context) => c.req.param("id") ?? "";
@@ -149,7 +155,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const { session } = c.var;
     // Anyone may leave; removing someone else takes an owner.
     if (c.req.param("userId") !== session.user.id) owner(c);
-    auth.removeMember(session.org.id, c.req.param("userId"));
+    auth.removeMember(session.org.id, c.req.param("userId"), session.user.id);
     return c.json({ ok: true });
   });
   priv.patch("/org", async (c) => {
@@ -219,7 +225,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
   });
   priv.post("/assets/:id/rebuild", async (c) => {
     const { ws } = c.var;
-    throttle(c, "watch", 20, 10 * 60_000);
+    throttle(c, "rebuild", 20, 10 * 60_000);
     return c.json(ws.assetSummary(await ws.rebuild(id(c), { defer: true })));
   });
 
@@ -251,6 +257,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     const { ws, actor } = c.var;
     const input = await jsonBody<{ csv: string; asOf: string; source?: string; reconcile?: boolean }>(c);
     if (typeof input.csv !== "string" || typeof input.asOf !== "string") throw new Invalid("csv and asOf are required");
+    if (input.reconcile !== false) throttle(c, "reconcile", 20, 10 * 60_000);
     const imported = ws.importRegister(id(c), input, actor);
     const run = input.reconcile === false ? null : await ws.reconcile(id(c), imported.registerId, actor);
     return c.json({ ...imported, run }, 201);
@@ -274,17 +281,27 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
 
   priv.get("/assets/:id/reconciliations", (c) => c.json(c.var.ws.runs(id(c))));
   priv.post("/assets/:id/reconciliations", async (c) => {
-    const input = Number(c.req.header("content-length") ?? 0) > 0 ? await jsonBody<{ registerId?: number }>(c) : {};
+    throttle(c, "reconcile", 20, 10 * 60_000);
+    const mediaType = (c.req.header("content-type") ?? "").split(";", 1)[0]?.trim().toLowerCase();
+    const body = mediaType === "application/json" ? await c.req.raw.clone().text() : "";
+    const input = body.trim() ? await jsonBody<{ registerId?: number }>(c) : {};
+    if (input.registerId !== undefined && (!Number.isSafeInteger(input.registerId) || input.registerId <= 0)) {
+      throw new Invalid("registerId must be a positive integer");
+    }
     return c.json(await c.var.ws.reconcile(id(c), input.registerId, c.var.actor), 201);
   });
   priv.get("/reconciliations/:id", (c) => c.json(c.var.ws.run(numeric(c, "id"))));
 
   priv.get("/assets/:id/actions", (c) => c.json(c.var.ws.actions(id(c))));
-  priv.post("/assets/:id/actions", async (c) =>
-    c.json(await c.var.ws.createAction(id(c), await jsonBody<ActionInput>(c), c.var.actor), 201),
-  );
+  priv.post("/assets/:id/actions", async (c) => {
+    throttle(c, "reconcile", 20, 10 * 60_000);
+    return c.json(await c.var.ws.createAction(id(c), await jsonBody<ActionInput>(c), c.var.actor), 201);
+  });
   priv.get("/actions/:id", (c) => c.json(c.var.ws.action(numeric(c, "id"))));
-  priv.post("/actions/:id/reconcile", async (c) => c.json(await c.var.ws.reconcileAction(numeric(c, "id"))));
+  priv.post("/actions/:id/reconcile", async (c) => {
+    throttle(c, "reconcile", 20, 10 * 60_000);
+    return c.json(await c.var.ws.reconcileAction(numeric(c, "id")));
+  });
 
   priv.get("/assets/:id/controls", (c) => c.json(c.var.ws.controls(id(c))));
 

@@ -1,3 +1,4 @@
+import { WarningList } from "../WarningList";
 import { useRef, useState } from "react";
 import { api, type AssetSummary, type Issue, type RegisterFile, type Run, type RunSummary } from "../api";
 import { BreakTable } from "../breaks";
@@ -10,7 +11,6 @@ import {
   Figures,
   IssueList,
   LOCAL_TIME_HINT,
-  Notice,
   Section,
   Skeleton,
   StatusBadge,
@@ -283,9 +283,7 @@ export function Reconciliation({ asset, onChange }: { asset: AssetSummary; onCha
       {view.error && <ErrorNote message={`Showing what was last loaded. ${view.error}`} />}
       {r && (
         <>
-          {r.warnings.map((w) => (
-            <Notice key={w}>{w}</Notice>
-          ))}
+          <WarningList warnings={r.warnings} />
           <Figures
             items={[
               { label: "Result", value: <StatusBadge status={r.status} /> },

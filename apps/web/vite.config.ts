@@ -7,6 +7,7 @@ const api = `http://127.0.0.1:${process.env.CONCORD_PORT ?? process.env.PORT ?? 
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: { target: "es2023" }, // Explicit evergreen-browser baseline; no API polyfills.
   test: {
     include: ["src/**/*.test.{ts,tsx}"],
     environment: "jsdom",

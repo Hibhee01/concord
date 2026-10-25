@@ -57,14 +57,17 @@ export function parseJournalCsv(
       if (!type) throw new Error(`unknown type "${values.type}"`);
       if (!values.ref) throw new Error("missing ref");
       if (Number.isNaN(Date.parse(values.date!))) throw new Error(`bad date "${values.date}"`);
+      const units = parseUnits(values.units!, decimals);
+      if (units <= 0n) throw new Error("units must be greater than zero");
       const entry: JournalEntry = {
         ref: values.ref,
         date: values.date!,
         type,
-        units: parseUnits(values.units!, decimals),
+        units,
       };
-      const from = values.from_account ?? values.from;
-      const to = values.to_account ?? values.to;
+      // An empty canonical column should fall back to the populated legacy alias.
+      const from = values.from_account || values.from;
+      const to = values.to_account || values.to;
       if (from) entry.from = from;
       if (to) entry.to = to;
       if (values.tx_hash) entry.txHash = values.tx_hash.toLowerCase();
@@ -156,7 +159,8 @@ export function reconcileMovements(
       pending.push(entry);
       continue;
     }
-    const sameTx = movements.filter((e) => e.txHash === entry.txHash && !used.has(e.id) && sameParties(entry, e));
+    const normalizedHash = entry.txHash.toLowerCase();
+    const sameTx = movements.filter((e) => e.txHash.toLowerCase() === normalizedHash && !used.has(e.id) && sameParties(entry, e));
     const exact = sameTx.find((e) => e.amount === entry.units);
     const hit = exact ?? sameTx[0];
     if (!hit) {
@@ -189,7 +193,7 @@ export function reconcileMovements(
         used.has(ev.id) ||
         ev.amount !== entry.units ||
         !sameParties(entry, ev) ||
-        (entry.txHash && ev.txHash !== entry.txHash)
+        (entry.txHash && ev.txHash.toLowerCase() !== entry.txHash.toLowerCase())
       ) {
         continue;
       }

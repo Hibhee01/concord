@@ -54,7 +54,7 @@ export function useAction() {
       await fn();
       return true;
     } catch (e) {
-      setError((e as Error).message);
+      setError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
       setBusy(false);
@@ -325,8 +325,8 @@ export function IssueList({ issues, what }: { issues: Issue[]; what: string }) {
         {issues.length} {issues.length === 1 ? "row" : "rows"} of the {what} not loaded
       </summary>
       <ul className="mt-2 flex max-h-56 flex-col gap-1 overflow-y-auto">
-        {issues.map((issue) => (
-          <li key={`${issue.line}-${issue.message}`} className="flex gap-3">
+        {issues.map((issue, index) => (
+          <li key={`${issue.line}-${index}`} className="flex gap-3">
             <span className="num shrink-0">line {issue.line}</span>
             <span>{issue.message}</span>
           </li>

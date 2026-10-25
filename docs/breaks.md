@@ -188,6 +188,8 @@ Defined in [`packages/core/src/controls.ts`](../packages/core/src/controls.ts). 
 |---|---|---|---|
 | `UNINSTRUCTED_CONTROL` | `high` | `UNINSTRUCTED_CONTROL:<eventId>` | On-chain control action was executed without an approved instruction |
 | `UNEXECUTED_INSTRUCTION` | `medium` | `UNEXECUTED_INSTRUCTION:<instruction.ref>` | Approved off-chain instruction was never executed on-chain before expiry |
+| `INSTRUCTION_IN_FUTURE` | `medium` | `INSTRUCTION_IN_FUTURE:<instruction.ref>` | An instruction is dated after the as-of time, so it can be neither pending nor unexecuted (usually a typo in the year) |
+| `LATE_INSTRUCTION` | `high` | `LATE_INSTRUCTION:<eventId>` | A compatible instruction was issued after the on-chain action, within the execution window (a backdated approval) |
 
 ### `UNINSTRUCTED_CONTROL`
 - **Key:** `UNINSTRUCTED_CONTROL:<eventId>`
@@ -212,6 +214,31 @@ Defined in [`packages/core/src/controls.ts`](../packages/core/src/controls.ts). 
   1. Check why the approved action was not executed within the 72-hour execution window.
   2. Determine if the instruction is still required or should be formally cancelled.
 - **Sign-off Meaning:** Acknowledged if the action was cancelled or re-issued under a new reference.
+
+### `LATE_INSTRUCTION`
+- **Key:** `LATE_INSTRUCTION:<eventId>`
+- **Severity:** `high`
+- **What it replaces:** One real-world action used to surface as two breaks: `UNINSTRUCTED_CONTROL` for the event, then `UNEXECUTED_INSTRUCTION` once the instruction's window ended. When a compatible instruction (same account and type, with authorize and unfreeze interchangeable, and the same units for a clawback) was issued *after* the event but no later than the execution window (default 72 hours) after it, Concord reports this single break instead and consumes the instruction, so it is neither unexecuted nor pending. The break carries the event id, the transaction hash and the instruction `ref`.
+- **Not paired:** An instruction issued after the window is not treated as a backdated approval of that event; the two breaks stand on their own. An instruction that properly covers a later event is never taken as "late" for an earlier one.
+- **Typical Causes:**
+  - A freeze or clawback was executed first and the approval was written up afterwards.
+  - The instruction was logged with an `issued_at` after the transaction closed.
+- **Investigation:**
+  1. Compare the instruction's `issued_at` with the transaction's close time.
+  2. Establish who authorised the action at the time and whether the paper trail was created after the fact.
+- **Sign-off Meaning:** Acknowledging confirms management has reviewed an action that was executed before its approval was recorded.
+
+### `INSTRUCTION_IN_FUTURE`
+- **Key:** `INSTRUCTION_IN_FUTURE:<instruction.ref>`
+- **Severity:** `medium`
+- **What it catches:** An instruction whose `issued_at` is later than the as-of time of the log. Before this break existed, such an instruction counted as pending indefinitely, so a typo such as `2099` hid an instruction that was never going to be matched. It is also never paired with an earlier on-chain action as a late approval, because at the as-of time it did not exist yet.
+- **Typical Causes:**
+  - A mistyped year or date in `issued_at`.
+  - A timezone or format error that pushed the timestamp forward.
+- **Investigation:**
+  1. Check the `issued_at` of the named instruction against the ticket or approval it records.
+  2. Correct the instruction file and import it again.
+- **Sign-off Meaning:** Acknowledged once the instruction has been corrected or confirmed as intentionally future-dated.
 
 ---
 

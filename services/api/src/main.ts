@@ -45,7 +45,7 @@ export interface Runtime {
 /** Identity records, the chain sources for both networks, and the workspaces over them. */
 export function openRuntime(config: Config): Runtime {
   const control = new Db(join(config.dataDir, "control.db"), CONTROL_MIGRATIONS);
-  const auth = new Auth(control, { signup: config.signup, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
+  const auth = new Auth(control, { signup: config.signup, maxInvites: config.maxInvitesPerOrg, ...(config.passwordCost ? { cost: config.passwordCost } : {}) });
   const networks: Networks = {};
   for (const name of NETWORK_NAMES) {
     networks[name] = { passphrase: config.networks[name].passphrase, chain: new StellarSource(config.networks[name]) };
@@ -158,6 +158,19 @@ export function startServer(config: Config = loadConfig()): void {
     if (config.ephemeral) console.warn("CONCORD_EPHEMERAL is set: users are told their data does not survive a restart.");
   });
 
+  // Keep sessions, invitations and one-time tokens bounded even when nobody presents an expired token.
+  const purge = () => {
+    try {
+      const counts = runtime.auth.purgeExpired();
+      if (counts.sessions || counts.invites || counts.tokens) console.log("identity cleanup", counts);
+    } catch (err) {
+      console.error("identity cleanup failed", err);
+    }
+  };
+  purge();
+  const purgeTimer = setInterval(purge, 60 * 60_000);
+  purgeTimer.unref();
+
   let timer: NodeJS.Timeout | undefined;
   if (config.syncIntervalSec > 0) {
     let busy = false;
@@ -188,6 +201,7 @@ export function startServer(config: Config = loadConfig()): void {
     stopping = true;
     console.log(`${signal}: shutting down`);
     if (timer) clearInterval(timer);
+    clearInterval(purgeTimer);
     server.close(() => {
       runtime.close();
       process.exit(0);

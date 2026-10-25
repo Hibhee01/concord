@@ -19,6 +19,8 @@ export interface NetworkConfig {
   /** Tried in order; a failing or rate-limited endpoint is rested and the next one used. */
   rpc: Endpoint[];
   horizon: Endpoint[];
+  /** Optional provider contact details appended to outbound User-Agent. */
+  userAgentSuffix?: string;
 }
 
 const DEFAULTS: Record<NetworkName, { passphrase: string; rpc: string[]; horizon: string[] }> = {
@@ -58,6 +60,8 @@ export interface Config {
   /** "open": anyone may create a workspace. "code": only with an operator-issued code. */
   signup: "open" | "code";
   maxAssetsPerOrg: number;
+  /** Pending invitations one workspace may hold at once. */
+  maxInvitesPerOrg: number;
   /** The host discards the data directory on restart. Shown to users rather than hidden. */
   ephemeral: boolean;
   google?: { clientId: string; clientSecret: string };
@@ -73,6 +77,42 @@ const RETIRED: Record<string, string> = {
   CONCORD_DB: "use CONCORD_DATA_DIR; each workspace has its own database under it",
   CONCORD_API_TOKEN: "users sign in; there is no shared token",
 };
+
+/** Recognized runtime settings, including the CLI-only workspace selector. */
+const KNOWN_CONCORD_SETTINGS = [
+  "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
+  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_HOST",
+  "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
+  "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
+  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
+  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
+] as const;
+const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(current[j - 1]! + 1, previous[j]! + 1,
+        previous[j - 1]! + Number(a[i - 1] !== b[j - 1]));
+    }
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+function warnUnknownSettings(env: NodeJS.ProcessEnv, warn: (message: string) => void): void {
+  for (const name of Object.keys(env)) {
+    if (!name.startsWith("CONCORD_") || KNOWN_SETTINGS.has(name) || name in RETIRED) continue;
+    const closest = [...KNOWN_SETTINGS].map((candidate) => ({
+      candidate, distance: editDistance(name, candidate),
+    })).sort((a, b) => a.distance - b.distance)[0];
+    const suggestion = closest && closest.distance <= 4 ? `; did you mean ${closest.candidate}?` : "";
+    warn(`Unknown Concord setting ${name}${suggestion}`);
+  }
+}
 
 function list(value: string | undefined): string[] {
   return (value ?? "")
@@ -107,13 +147,18 @@ function endpoints(urls: string[], headers: Record<string, Record<string, string
   return urls.map((url) => {
     let host: string;
     let hostname: string;
+    let hasCredentials = false;
     try {
       const parsed = new URL(url);
+      hasCredentials = Boolean(parsed.username || parsed.password);
       if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("not http");
       host = parsed.host;
       hostname = parsed.hostname;
     } catch {
       throw new Error(`${name} holds something that is not a URL`);
+    }
+    if (hasCredentials) {
+      throw new Error(`${name} must not contain URL credentials; configure Authorization via CONCORD_RPC_HEADERS`);
     }
     const endpoint: Endpoint = { url: url.replace(/\/+$/, "") };
     const h = headers[host] ?? headers[hostname];
@@ -125,17 +170,26 @@ function endpoints(urls: string[], headers: Record<string, Record<string, string
 /** The repository root in a checkout, /app in the container. */
 const ROOT = resolve(import.meta.dirname, "../../..");
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message: string) => void = console.warn): Config {
   if (env === process.env) {
     try {
       // A .env beside package.json, when there is one. Variables already set take precedence.
       process.loadEnvFile(resolve(ROOT, ".env"));
-    } catch {
-      // No file: the environment is all there is.
+    } catch (err) {
+      // A missing .env is optional, but permission and parsing errors are configuration failures.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Failed to load .env: ${(err as Error).message}`, { cause: err });
+      }
     }
   }
   for (const [name, advice] of Object.entries(RETIRED)) {
     if (env[name]) throw new Error(`${name} is no longer read: ${advice}`);
+  }
+
+  warnUnknownSettings(env, warn);
+
+  if (env.CONCORD_USER_AGENT_SUFFIX && !/^[\x20-\x7e]{1,120}$/.test(env.CONCORD_USER_AGENT_SUFFIX)) {
+    throw new Error("CONCORD_USER_AGENT_SUFFIX must be at most 120 printable ASCII characters");
   }
 
   let headers: Record<string, Record<string, string>> = {};
@@ -170,6 +224,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       passphrase: base.passphrase,
       rpc: endpoints(rpc.length ? rpc : base.rpc, headers, `CONCORD_${upper}_RPC_URLS`),
       horizon: endpoints(horizon.length ? horizon : base.horizon, headers, `CONCORD_${upper}_HORIZON_URLS`),
+      ...(env.CONCORD_USER_AGENT_SUFFIX ? { userAgentSuffix: env.CONCORD_USER_AGENT_SUFFIX } : {}),
     };
   };
 
@@ -189,11 +244,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         : host;
   // Render names the service's own address in RENDER_EXTERNAL_URL.
   let publicUrl = env.CONCORD_PUBLIC_URL || env.RENDER_EXTERNAL_URL || `http://${urlHost}:${port}`;
+  let parsedPublicUrl: URL;
   try {
-    publicUrl = new URL(publicUrl).origin;
+    parsedPublicUrl = new URL(publicUrl);
   } catch {
     throw new Error("CONCORD_PUBLIC_URL must be a URL such as https://concord.example.com");
   }
+  // Everything past the origin used to be dropped silently (…/concord became
+  // the bare origin), so cookies, the Google redirect URI and invite links on
+  // a sub-path deployment pointed at the wrong place with no explanation.
+  // Concord serves from "/", so a sub-path is a configuration error worth
+  // naming, not trimming. A bare trailing slash parses to pathname "/" and
+  // stays accepted.
+  if (parsedPublicUrl.pathname !== "/" || parsedPublicUrl.search !== "" || parsedPublicUrl.hash !== "") {
+    throw new Error(
+      `CONCORD_PUBLIC_URL must not carry a path, query or fragment — Concord serves from the root ` +
+        `and sub-path hosting is not supported. Got "${publicUrl}"; use "${parsedPublicUrl.origin}".`,
+    );
+  }
+  publicUrl = parsedPublicUrl.origin;
 
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
@@ -204,9 +273,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
     webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
-    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0),
+    trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0, 0, 10),
     signup,
-    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1),
+    maxAssetsPerOrg: integer(env, "CONCORD_MAX_ASSETS", 10, 1, 1000),
+    maxInvitesPerOrg: integer(env, "CONCORD_MAX_INVITES", 100, 1, 10000),
     ephemeral: flag(env, "CONCORD_EPHEMERAL", false),
   };
   if (env.CONCORD_PASSWORD_COST) {
@@ -215,6 +285,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const whole = (n: number | undefined, min: number, max: number) => Number.isInteger(n) && n! >= min && n! <= max;
     if (!whole(N, 2 ** 14, 2 ** 20) || (N! & (N! - 1)) !== 0 || !whole(r, 8, 32) || !whole(p, 1, 16)) {
       throw new Error("CONCORD_PASSWORD_COST must be N:r:p, with N a power of two from 16384, r from 8 and p from 1; e.g. 32768:8:3");
+    }
+    const scryptMemoryBytes = 128 * N! * r!;
+    if (scryptMemoryBytes > 128 * 1024 * 1024) {
+      throw new Error("CONCORD_PASSWORD_COST cannot exceed 128 MiB of scrypt memory");
     }
     config.passwordCost = { N: N!, r: r!, p: p! };
   }

@@ -24,9 +24,12 @@ function headers(json: boolean): HeadersInit {
   return h;
 }
 
-async function failure(res: Response, fallback: string): Promise<ApiError> {
+async function failure(res: Response, fallback: string, path: string): Promise<ApiError> {
   const detail = (await res.json().catch(() => null)) as { error?: string } | null;
-  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED));
+  // Credential-entry and invite errors do not imply the active session expired.
+  const sessionEndpoint = path === "/auth/me" || path === "/auth/session";
+  const protectedEndpoint = !path.startsWith("/auth/") || sessionEndpoint;
+  if (res.status === 401 && protectedEndpoint) window.dispatchEvent(new Event(UNAUTHORIZED));
   return new ApiError(detail?.error ?? `${fallback} (${res.status})`, res.status);
 }
 
@@ -42,7 +45,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   } catch {
     throw new ApiError("The Concord server is not reachable. Check your connection and try again.", 0);
   }
-  if (!res.ok) throw await failure(res, "Request failed");
+  if (!res.ok) throw await failure(res, "Request failed", path);
   if (res.status === 204) return undefined as T;
   try {
     return (await res.json()) as T;
@@ -54,7 +57,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 /** Downloads go through fetch so a failure can be shown in place instead of on a blank page. */
 export async function download(path: string, fallbackName: string): Promise<void> {
   const res = await fetch(`/api${path}`, { headers: headers(false), credentials: "same-origin" });
-  if (!res.ok) throw await failure(res, "Download failed");
+  if (!res.ok) throw await failure(res, "Download failed", path);
   const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? fallbackName;
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");

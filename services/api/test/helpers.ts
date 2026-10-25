@@ -86,10 +86,14 @@ export interface Harness {
 }
 
 /** The whole service over in-memory databases and a fake chain. */
-export function harness(options: Partial<ApiOptions> = {}, networks?: Networks): Harness {
+export function harness(
+  options: Partial<ApiOptions> = {},
+  networks?: Networks,
+  authOptions: { maxInvites?: number } = {},
+): Harness {
   const now = { value: Date.now() };
   const control = new Db(":memory:", CONTROL_MIGRATIONS);
-  const auth = new Auth(control, { signup: options.signup ?? "open", cost: FAST, now: () => now.value });
+  const auth = new Auth(control, { signup: options.signup ?? "open", cost: FAST, now: () => now.value, ...authOptions });
   const chain = new FakeChain();
   const removed: string[] = [];
   const inner = memoryStore();

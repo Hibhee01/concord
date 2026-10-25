@@ -16,10 +16,21 @@ export class Db {
   ) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.raw = new DatabaseSync(path);
-    // The CLI and the server may hold the same file; wait for the other rather than fail.
-    this.raw.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.migrate(migrations);
-    this.raw.exec("PRAGMA foreign_keys = ON;");
+    try {
+      // The CLI and the server may hold the same file; wait for the other rather than fail.
+      // The timeout comes first: switching to WAL takes a lock of its own and would otherwise fail at once.
+      this.raw.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
+      this.migrate(migrations);
+      this.raw.exec("PRAGMA foreign_keys = ON;");
+    } catch (err) {
+      // A failed constructor cannot be closed by the caller; never retain its SQLite handle.
+      try {
+        this.raw.close();
+      } catch {
+        // Preserve the initialization error, even if closing the broken handle also fails.
+      }
+      throw err;
+    }
   }
 
   private pragma(name: string): number {
@@ -98,7 +109,9 @@ export class Db {
   }
 
   tx<T>(fn: () => T): T {
-    this.raw.exec("BEGIN");
+    // Reserve the write lock before reading: WAL read-to-write upgrades can otherwise
+    // fail immediately with SQLITE_BUSY_SNAPSHOT after another connection commits.
+    this.raw.exec("BEGIN IMMEDIATE");
     try {
       const out = fn();
       this.raw.exec("COMMIT");

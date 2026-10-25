@@ -12,6 +12,7 @@ const GOOGLE_ERRORS: Record<string, string> = {
   google_cancelled: "Google sign-in was cancelled.",
   google_failed: "Google sign-in did not complete. Try again.",
   google_mismatch: "Connect the Google account that uses the same email address as your Concord account.",
+  google_invalid_email: "Google did not provide a valid email address. Check the account and try again.",
   signup_code: "New workspaces need a valid sign-up code from the operator of this server.",
 };
 
@@ -95,6 +96,7 @@ function Password({
     >
       <span className="flex gap-2">
         <input
+          aria-label={label}
           type={shown ? "text" : "password"}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -103,7 +105,7 @@ function Password({
           className={inputClass}
           required
         />
-        <Button onClick={() => setShown(!shown)} aria-pressed={shown} className="shrink-0">
+        <Button onClick={() => setShown(!shown)} className="shrink-0">
           {shown ? "Hide" : "Show"}
         </Button>
       </span>

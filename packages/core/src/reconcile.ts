@@ -24,6 +24,13 @@ export interface PositionBreak {
   registerUnits?: bigint;
   /** chain minus register. */
   difference?: bigint;
+  /**
+   * True when the break is a likely consequence of another finding rather
+   * than an independent one — today, a supply mismatch while some holder's
+   * history is incomplete. The primary break to act on is the one without
+   * this flag.
+   */
+  consequential?: boolean;
   message: string;
 }
 
@@ -70,6 +77,12 @@ export function reconcilePositions(
   const tolerance = options.tolerance ?? 0n;
   const ignore = new Set(options.ignore ?? []);
   const breaks: PositionBreak[] = [];
+  // Addresses whose indexed history is known to be incomplete. One missing
+  // mint produces a negative derived balance AND a per-address quantity break
+  // AND a supply mismatch — three findings with one root cause — so the
+  // quantity break folds into the INCOMPLETE_HISTORY break below and the
+  // supply mismatch is only flagged as consequential.
+  const incomplete = new Set(chain.incomplete.filter((address) => !ignore.has(address)));
 
   const byAddress = new Map<string, { units: bigint; holderIds: string[]; statuses: Set<HolderStatus> }>();
   let registerTotal = 0n;
@@ -93,7 +106,7 @@ export function reconcilePositions(
     }
     const entry = byAddress.get(p.account) ?? { units: 0n, holderIds: [], statuses: new Set() };
     entry.units += p.units;
-    entry.holderIds.push(p.holderId);
+    if (!entry.holderIds.includes(p.holderId)) entry.holderIds.push(p.holderId);
     if (p.status) entry.statuses.add(p.status);
     byAddress.set(p.account, entry);
   }
@@ -103,7 +116,10 @@ export function reconcilePositions(
   for (const [address, amount] of chain.balances) {
     if (ignore.has(address)) continue;
     chainSupply += amount;
-    chainHolders++;
+    // A negative derived balance is an artifact of missing history, not a
+    // holder; counting it as one would overstate chainHolders in exactly the
+    // runs where the history is already flagged.
+    if (amount > 0n) chainHolders++;
   }
 
   const addresses = new Set<string>([...byAddress.keys()]);
@@ -127,7 +143,11 @@ export function reconcilePositions(
     if (abs(difference) > tolerance) {
       matched = false;
       grossDifference += abs(difference);
-      if (!reg) {
+      if (incomplete.has(address)) {
+        // Folded: the quantity context rides on this address's
+        // INCOMPLETE_HISTORY break below instead of standing as its own
+        // MISSING_IN_REGISTER/QUANTITY_MISMATCH finding with the same cause.
+      } else if (!reg) {
         breaks.push({
           ...base,
           type: "MISSING_IN_REGISTER",
@@ -178,18 +198,27 @@ export function reconcilePositions(
       chainUnits: chainSupply,
       registerUnits: registerTotal,
       difference: chainSupply - registerTotal,
-      message: "Units outstanding on-chain differ from the register total",
+      ...(incomplete.size > 0 ? { consequential: true } : {}),
+      message:
+        incomplete.size > 0
+          ? "Units outstanding on-chain differ from the register total; likely a consequence of the incomplete history flagged below"
+          : "Units outstanding on-chain differ from the register total",
     });
   }
-  for (const address of chain.incomplete) {
-    if (ignore.has(address)) continue;
+  for (const address of incomplete) {
+    const chainUnits = chain.balances.get(address) ?? 0n;
+    const registerUnits = byAddress.get(address)?.units ?? 0n;
     breaks.push({
       type: "INCOMPLETE_HISTORY",
       severity: "high",
       key: `INCOMPLETE_HISTORY:${address}`,
       address,
       holderIds: byAddress.get(address)?.holderIds ?? [],
-      message: "Indexed events do not cover this holder's full history; take a baseline",
+      chainUnits,
+      registerUnits,
+      difference: chainUnits - registerUnits,
+      message:
+        "Indexed events do not cover this holder's full history; take a baseline. Its quantity differences are folded into this break",
     });
   }
 
@@ -201,7 +230,7 @@ export function reconcilePositions(
       registerTotal,
       unmappedUnits,
       chainHolders,
-      registerHolders: register.filter((p) => p.units > 0n).length,
+      registerHolders: register.filter((p) => p.units > 0n && (!p.account || !ignore.has(p.account))).length,
       matchedLines: lines.filter((l) => l.matched).length,
       breakCount: breaks.length,
       grossDifference,

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { decodeEvent } from "../src/chain.js";
+import { ChainError, StellarSource, cursorLedger, decodeEvent } from "../src/chain.js";
 import { USAGE } from "../src/cli-usage.js";
 import { Concord, Invalid, NotFound } from "../src/concord.js";
 import { Db } from "../src/db.js";
@@ -108,6 +108,88 @@ describe("decodeEvent", () => {
       amount: 0n,
     });
   });
+
+  it("returns undefined without throwing when topic or value contains malformed XDR", () => {
+    // Malformed topic (not valid base64 / ScVal)
+    const badTopicRaw = {
+      ...raw(["!!!notxdr", addr(a), addr(b), str(`FUND:${a}`)], i128(5n)),
+    };
+    expect(() => decodeEvent(badTopicRaw)).not.toThrow();
+    expect(decodeEvent(badTopicRaw)).toBeUndefined();
+
+    // Truncated / malformed value XDR
+    const truncatedValueRaw = {
+      ...raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], "AAAA"),
+    };
+    expect(() => decodeEvent(truncatedValueRaw)).not.toThrow();
+    expect(decodeEvent(truncatedValueRaw)).toBeUndefined();
+  });
+
+  it("skips malformed events and returns the remaining good events in getEvents", async () => {
+    const goodRaw = raw([sym("transfer"), addr(a), addr(b), str(`FUND:${a}`)], i128(5n));
+    // A kind Concord does not track is ignored, not malformed.
+    const ignoredRaw = raw([sym("approve"), addr(a), addr(b), str(`FUND:${a}`)], i128(1n));
+    const badRaw = {
+      ...raw(["!!!notxdr", addr(a), addr(b), str(`FUND:${a}`)], i128(5n)),
+      id: "0000000429496729600-0000000002",
+    };
+    const network = {
+      name: "testnet" as const,
+      passphrase: "test",
+      rpc: [{ url: "https://rpc.example" }],
+      horizon: [{ url: "https://horizon.example" }],
+    };
+    const deps = {
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              events: [badRaw, ignoredRaw, goodRaw],
+              latestLedger: 100,
+              cursor: "cursor-1",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      now: () => 0,
+      sleep: async () => {},
+    };
+    const source = new StellarSource(network, deps);
+    const page = await source.getEvents("CASSET", { startLedger: 1 }, 10);
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0]!.kind).toBe("transfer");
+    expect(page.events[0]!.amount).toBe(5n);
+    expect(page.skipped).toBe(1);
+    expect(page.latestLedger).toBe(100);
+    expect(page.cursor).toBe("cursor-1");
+  });
+});
+
+describe("cursorLedger", () => {
+  it("decodes valid TOID cursors with or without index", () => {
+    // 100 << 32 = 429496729600n
+    expect(cursorLedger("429496729600-0000000001")).toBe(100);
+    expect(cursorLedger("429496729600-1")).toBe(100);
+    expect(cursorLedger("429496729600")).toBe(100);
+  });
+
+  const invalidCases = [
+    { label: "empty string", input: "" },
+    { label: "negative number", input: "-5" },
+    { label: "non-numeric string", input: "abc-1" },
+    { label: "invalid characters", input: "123a-45" },
+    { label: "multiple hyphens", input: "123-45-67" },
+    { label: "trailing hyphen", input: "123-" },
+  ];
+
+  for (const { label, input } of invalidCases) {
+    it(`throws ChainError on ${label} (${JSON.stringify(input)})`, () => {
+      expect(() => cursorLedger(input)).toThrow(ChainError);
+      expect(() => cursorLedger(input)).toThrow(/invalid cursor/);
+    });
+  }
 });
 
 describe("Concord", () => {
@@ -264,6 +346,24 @@ describe("Concord", () => {
     expect((await concord.reconcileAction(split.id)).state).toBe("clean");
   });
 
+  it("reconciles reverse splits executed as burns rather than clawbacks", async () => {
+    chain.push(assetId, "burn", 7, { from: h1, amount: u(50) });
+    chain.push(assetId, "burn", 7, { from: h2, amount: u(25) });
+    const split = await concord.createAction("FUND", {
+      type: "split",
+      recordTime: at(5),
+      windowTo: at(9),
+      num: "1",
+      den: "2",
+    });
+    expect(split.state).toBe("clean");
+    expect(split.result?.summary).toMatchObject({
+      expectedTotal: "-75",
+      observedTotal: "-75",
+      breakCount: 0,
+    });
+  });
+
   it("rejects non-address payer and warns on a silent payer", async () => {
     await expect(
       concord.createAction("FUND", {
@@ -370,11 +470,13 @@ describe("Concord", () => {
       "FUND",
       `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
     );
-    // I1 and I2 cover the authorisation and freeze; I3 is recent enough to still be pending, and
-    // the clawback has no instruction, so every controls branch appears in the pack.
+    // I1 and I2 cover the authorisation and freeze; I3 is issued a minute before the controls log's
+    // as-of time (the asset's synced time), so it is still pending, and the clawback has no
+    // instruction, so every controls branch appears in the pack.
+    const pendingIssuedAt = new Date(Date.parse(concord.asset("FUND").syncedAt!) - 60_000).toISOString();
     concord.importInstructions(
       "FUND",
-      `ref,type,account,units,issued_at,approved_by,reason\nI1,authorise,${h1},,${at(1)},ops,KYC\nI2,freeze,${h2},,${at(19)},compliance,order\nI3,freeze,${h3},,${new Date().toISOString()},ops,review\n`,
+      `ref,type,account,units,issued_at,approved_by,reason\nI1,authorise,${h1},,${at(1)},ops,KYC\nI2,freeze,${h2},,${at(19)},compliance,order\nI3,freeze,${h3},,${pendingIssuedAt},ops,review\n`,
     );
     const reg = concord.importRegister("FUND", {
       csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,active\n`,
@@ -623,6 +725,19 @@ describe("Concord", () => {
     expect(healed.syncError).toBeUndefined();
   });
 
+  it("reports an unreadable saved cursor instead of a parse error or a skipped gap check", async () => {
+    const db = new Db(":memory:");
+    const damaged = new Concord(db, { testnet: { passphrase: PASSPHRASE, chain } });
+    const watched = await damaged.watchAsset({ network: "testnet", asset: `DMG:${issuer}`, fromLedger: 1 });
+    await damaged.sync(watched.id);
+    // An empty cursor reads as "no cursor", so only non-empty junk counts as damage.
+    for (const cursor of ["-5", "abc-1", "123-"]) {
+      db.write("UPDATE assets SET cursor = ? WHERE id = ?", cursor, watched.id);
+      await expect(damaged.sync(watched.id)).rejects.toThrow(/saved indexing position is unreadable/);
+      expect(damaged.asset(watched.id).syncError).toMatch(/Rebuild this asset/);
+    }
+  });
+
   it("reports a gap instead of indexing across it", async () => {
     await concord.sync("FUND");
     chain.latest = 500_000;
@@ -685,6 +800,28 @@ describe("Concord", () => {
     await concord.watchAsset({ network: "testnet", asset: `FUND:${key()}`, fromLedger: 1 });
     expect(() => concord.asset("FUND")).toThrow(/more than one/);
     expect(concord.asset(assetId).id).toBe(assetId);
+  });
+
+  it("handles concurrent watchAsset calls gracefully without UNIQUE constraint failure", async () => {
+    const assetCode = `CONC:${key()}`;
+    const origDescribe = chain.describe?.bind(chain);
+    chain.describe = async (candidate) => {
+      await new Promise((r) => setTimeout(r, 25));
+      return origDescribe ? origDescribe(candidate) : { decimals: 7, name: "Concurrent Test" };
+    };
+
+    const [r1, r2] = await Promise.allSettled([
+      concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
+      concord.watchAsset({ network: "testnet", asset: assetCode, fromLedger: 1 }),
+    ]);
+
+    const successes = [r1, r2].filter((r) => r.status === "fulfilled");
+    const rejections = [r1, r2].filter((r) => r.status === "rejected");
+
+    expect(successes).toHaveLength(1);
+    expect(rejections).toHaveLength(1);
+    expect((rejections[0] as PromiseRejectedResult).reason).toBeInstanceOf(Invalid);
+    expect((rejections[0] as PromiseRejectedResult).reason.message).toContain("is already watched");
   });
 
   it("validates decimals for classic and contract assets", async () => {
