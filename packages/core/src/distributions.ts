@@ -87,7 +87,7 @@ export interface FlowWindow {
   untilTime?: string;
   /** Kinds that add to a holder. A transfer counts only when sent by `payer` to another address. */
   plus: EventKind[];
-  /** Kinds that take from a holder. */
+  /** Kinds that debit a holder. Transfer debits the sender for non-self transfers. */
   minus: EventKind[];
   /** Paying agent for transfer-based distributions. */
   payer?: string;
@@ -99,6 +99,13 @@ export interface ObservedFlow {
 }
 
 export function observeFlows(events: AssetEvent[], window: FlowWindow): Map<string, ObservedFlow> {
+  if (window.plus.includes("transfer") && !window.payer) {
+    throw new Error("transfer flows require a payer");
+  }
+  const after = window.afterTime === undefined ? undefined : Date.parse(window.afterTime);
+  const until = window.untilTime === undefined ? undefined : Date.parse(window.untilTime);
+  if (after !== undefined && Number.isNaN(after)) throw new Error("invalid afterTime");
+  if (until !== undefined && Number.isNaN(until)) throw new Error("invalid untilTime");
   const out = new Map<string, ObservedFlow>();
   const add = (address: string | undefined, delta: bigint, txHash: string) => {
     if (!address) return;
@@ -110,11 +117,16 @@ export function observeFlows(events: AssetEvent[], window: FlowWindow): Map<stri
   for (const ev of events) {
     if (window.fromLedger !== undefined && ev.ledger < window.fromLedger) continue;
     if (window.toLedger !== undefined && ev.ledger > window.toLedger) continue;
-    if (window.afterTime !== undefined && ev.closedAt <= window.afterTime) continue;
-    if (window.untilTime !== undefined && ev.closedAt > window.untilTime) continue;
+    const closedAt = Date.parse(ev.closedAt);
+    if (after !== undefined && closedAt <= after) continue;
+    if (until !== undefined && closedAt > until) continue;
     if (ev.kind === "transfer") {
-      if (window.plus.includes("transfer") && window.payer && ev.from === window.payer && ev.to !== ev.from) {
+      if (ev.to === ev.from) continue; // Self-transfers do not move units between holders.
+      if (window.plus.includes("transfer") && window.payer && ev.from === window.payer) {
         add(ev.to, ev.amount, ev.txHash);
+      }
+      if (window.minus.includes("transfer")) {
+        add(ev.from, -ev.amount, ev.txHash);
       }
     } else if (window.plus.includes(ev.kind)) {
       add(ev.kind === "mint" ? ev.to : ev.from, ev.amount, ev.txHash);

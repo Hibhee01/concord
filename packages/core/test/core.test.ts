@@ -4,11 +4,14 @@ import {
   controlEvents,
   dividendEntitlements,
   formatUnits,
+  mulDiv,
   observeFlows,
   parseCsv,
+  parseCsvTable,
   parseInstructionsCsv,
   parseJournalCsv,
   parseRegisterCsv,
+  parseRatio,
   parseUnits,
   reconcileDistribution,
   reconcileMovements,
@@ -32,6 +35,68 @@ describe("amounts", () => {
     expect(formatUnits(-1n)).toBe("-0.0000001");
     expect(parseUnits("5.10000000")).toBe(51_000_000n);
   });
+  it.each([
+    ["0", 0n, 1n],
+    ["0.5", 5n, 10n],
+    ["10", 10n, 1n],
+    ["0.0123456789", 123456789n, 10n ** 10n],
+    [" 1 ", 1n, 1n],
+  ])("parses non-negative ratio %j exactly", (raw, num, den) => {
+    expect(parseRatio(raw)).toEqual({ num, den });
+  });
+
+  it.each(["-1", "1e-3", ".5", "1,5", ""])("rejects invalid ratio %j", (raw) => {
+    expect(() => parseRatio(raw)).toThrow(`not a non-negative decimal: "${raw}"`);
+  });
+
+  it.each([
+    ["1,234", 12_340_000_000n],
+    ["12,345,678", 123_456_780_000_000n],
+    ["-1,234.5", -12_345_000_000n],
+  ])("accepts grouped amount %s", (raw, units) => {
+    expect(parseUnits(raw)).toBe(units);
+  });
+
+  it.each(["1,23", "12,3456", "1,50,000", ",5", "1,,000"])(
+    "rejects malformed grouping in %s",
+    (raw) => {
+      expect(() => parseUnits(raw)).toThrow(`not a decimal amount: "${raw}"`);
+    },
+  );
+
+  it.each([
+    [0n, 7, "0"],
+    [1n, 7, "0.0000001"],
+    [-1n, 7, "-0.0000001"],
+    [10_000_000n, 7, "1"],
+    [12_345_678n, 7, "1.2345678"],
+    [5n, 0, "5"],
+    [-5n, 0, "-5"],
+    [1n, 18, "0.000000000000000001"],
+  ])("formats %s units at %i decimals", (units, decimals, expected) => {
+    const formatted = formatUnits(units, decimals);
+    expect(formatted).toBe(expected);
+    expect(formatted).not.toMatch(/\.$|\.\d*0$/);
+  });
+
+  it.each([" 12 ", "\t12\n"])("accepts surrounding whitespace in %j", (value) => {
+    expect(parseUnits(value)).toBe(120_000_000n);
+  });
+
+  it.each(["1 000", "1\u00a0000", "- 5"])("rejects interior whitespace in %j", (value) => {
+    expect(() => parseUnits(value)).toThrow(`not a decimal amount: "${value}"`);
+  });
+
+  it.each([
+    [-1n, 1n, 1n, "mulDiv expects non-negative operands"],
+    [1n, -1n, 1n, "mulDiv expects non-negative operands"],
+    [1n, 1n, 0n, "denominator must be positive"],
+    [1n, 1n, -1n, "denominator must be positive"],
+    [-1n, 1n, 0n, "denominator must be positive"],
+  ])("validates mulDiv operands (%s, %s, %s)", (a, b, den, error) => {
+    expect(() => mulDiv(a, b, den)).toThrow(error);
+  });
+
   it("refuses to round", () => {
     expect(() => parseUnits("0.00000001")).toThrow(/decimal places/);
     expect(() => parseUnits("1e5")).toThrow();
@@ -45,6 +110,240 @@ describe("csv", () => {
       ['x, "y"', "2"],
     ]);
     expect(toCsv(["a", "b"], [{ a: 'x, "y"', b: 2 }])).toBe('a,b\n"x, ""y""",2\n');
+  });
+});
+
+describe("register decimal precision", () => {
+  it("imports whole-token units exactly with zero decimal places", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH0,A,1\n", 0);
+    expect(issues).toEqual([]);
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.units).toBe(1n);
+  });
+
+  it("reports fractional units as an issue for a zero-decimal token", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH0,A,1.5\n", 0);
+    expect(positions).toEqual([]);
+    expect(issues).toEqual([{ line: 2, message: '"1.5" has more than 0 decimal places' }]);
+  });
+
+  it("retains every fractional digit for an 18-decimal token", () => {
+    const { positions, issues } = parseRegisterCsv(
+      "holder_id,account,units\nH18,A,1.123456789012345678\n", 18,
+    );
+    expect(issues).toEqual([]);
+    expect(positions[0]!.units).toBe(1123456789012345678n);
+  });
+
+  it("keeps the default seven-decimal validation as a row issue", () => {
+    const { positions, issues } = parseRegisterCsv("holder_id,account,units\nH7,A,1.12345678\n");
+    expect(positions).toEqual([]);
+    expect(issues).toEqual([{ line: 2, message: '"1.12345678" has more than 7 decimal places' }]);
+  });
+});
+
+describe("transfer debit observations", () => {
+  it("debits the sender for transfers listed in minus, without a payer", () => {
+    const events = [ev("transfer", 8, { from: "A", to: "B", amount: u(7), txHash: "tx7" })];
+    const observed = observeFlows(events, { plus: [], minus: ["transfer"] });
+    expect([...observed.keys()]).toEqual(["A"]);
+    expect(observed.get("A")).toEqual({ amount: -u(7), txHashes: ["tx7"] });
+  });
+
+  it("credits the payer transfer recipient and debits the sender when both configured", () => {
+    const events = [ev("transfer", 9, { from: "PAY", to: "B", amount: u(2), txHash: "tx2" })];
+    const observed = observeFlows(events, {
+      plus: ["transfer"], minus: ["transfer"], payer: "PAY",
+    });
+    expect(observed.get("PAY")).toMatchObject({ amount: -u(2) });
+    expect(observed.get("B")).toMatchObject({ amount: u(2) });
+  });
+
+  it("does not record a self-transfer as a debit or credit", () => {
+    const events = [ev("transfer", 10, { from: "A", to: "A", amount: u(3) })];
+    expect(observeFlows(events, { plus: ["transfer"], minus: ["transfer"], payer: "A" }).size).toBe(0);
+  });
+});
+
+describe("transfer distribution payer validation", () => {
+  it("rejects transfer observation without a payer rather than silently dropping events", () => {
+    const events = [ev("transfer", 7, { from: "PAY", to: "H", amount: u(5) })];
+    expect(() => observeFlows(events, { plus: ["transfer"], minus: [] }))
+      .toThrow("transfer flows require a payer");
+    expect(observeFlows(events, { plus: ["transfer"], minus: [], payer: "PAY" }).get("H")?.amount)
+      .toBe(u(5));
+  });
+
+  it("allows payer-free mint observations", () => {
+    const events = [ev("mint", 8, { to: "H", amount: u(3) })];
+    expect(observeFlows(events, { plus: ["mint"], minus: [] }).get("H")?.amount).toBe(u(3));
+  });
+});
+
+describe("CSV duplicate header validation", () => {
+  it("reports duplicate normalized headers with both column positions", () => {
+    expect(() => parseCsvTable("units,units\n1,2\n"))
+      .toThrow('duplicate column "units" (columns 1 and 2)');
+    expect(() => parseCsvTable("Units, units\n1,2\n"))
+      .toThrow('duplicate column "units" (columns 1 and 2)');
+    expect(() => parseCsvTable("holder-id,holder id\nH1,H2\n"))
+      .toThrow('duplicate column "holder_id" (columns 1 and 2)');
+  });
+
+  it("allows multiple empty headers without creating an empty-key field", () => {
+    const table = parseCsvTable("a,,\n1,unused,ignored\n");
+    expect(table.records[0]!.values).toEqual({ a: "1" });
+    expect(Object.keys(table.records[0]!.values)).toEqual(["a"]);
+  });
+});
+
+describe("CSV prototype-safe headers", () => {
+  it("preserves built-in object property names as regular CSV columns", () => {
+    const table = parseCsvTable("__proto__,constructor,toString\nsafe,ctor,text\n");
+    const values = table.records[0]!.values;
+    expect(Object.getPrototypeOf(values)).toBeNull();
+    expect(Object.keys(values)).toEqual(["__proto__", "constructor", "tostring"]);
+    expect(values["__proto__"]).toBe("safe");
+    expect(values.constructor).toBe("ctor");
+    expect(values.tostring).toBe("text");
+  });
+});
+
+describe("CSV closing quote validation", () => {
+  it("rejects non-whitespace characters after a closing quote with location", () => {
+    expect(() => parseCsv('"ab"cd,e')).toThrow("unexpected character after closing quote at line 1, column 5");
+    expect(() => parseCsv('a,b\n"x"q,c')).toThrow("unexpected character after closing quote at line 2, column 4");
+  });
+
+  it("allows whitespace followed by a delimiter or line ending", () => {
+    expect(parseCsv('"ab" ,c\n')).toEqual([["ab", "c"]]);
+    expect(parseCsv('"ab"\n')).toEqual([["ab"]]);
+    expect(parseCsv('"ab"\t,tail\r\n')).toEqual([["ab", "tail"]]);
+  });
+});
+
+describe("CSV value safety", () => {
+  it("serializes dates as stable UTC ISO strings and bigints exactly", () => {
+    expect(toCsv(["value"], [{ value: new Date(0) }]))
+      .toBe("value\n1970-01-01T00:00:00.000Z\n");
+    expect(toCsv(["value"], [{ value: 10n }, { value: 1.5 }, { value: true }, { value: null }]))
+      .toBe("value\n10\n1.5\ntrue\n\n");
+  });
+
+  it.each([NaN, Infinity, -Infinity])("rejects non-finite numbers (%s)", (value) => {
+    expect(() => toCsv(["value"], [{ value }])).toThrow("cannot export non-finite number to CSV");
+  });
+
+  it.each([{}, { a: 1 }, [1, 2]])("rejects object and array values", (value) => {
+    expect(() => toCsv(["value"], [{ value }])).toThrow("cannot export object or array to CSV");
+  });
+
+  it("rejects invalid dates rather than exporting Invalid Date", () => {
+    expect(() => toCsv(["value"], [{ value: new Date(NaN) }]))
+      .toThrow("cannot export invalid Date to CSV");
+  });
+});
+
+describe("clawback instruction units", () => {
+  it("reports non-positive clawback units and retains valid instructions", () => {
+    const csv = [
+      "ref,type,account,units,issued_at",
+      "I0,clawback,GA,0,2026-10-01T00:00:00Z",
+      "I1,clawback,GA,-1,2026-10-01T00:00:00Z",
+      "I2,clawback,GA,2,2026-10-01T00:00:00Z",
+    ].join("\n");
+    const { instructions, issues } = parseInstructionsCsv(csv);
+    expect(issues).toEqual([
+      { line: 2, message: "clawback units must be greater than zero" },
+      { line: 3, message: "clawback units must be greater than zero" },
+    ]);
+    expect(instructions).toHaveLength(1);
+    expect(instructions[0]).toMatchObject({ ref: "I2", units: parseUnits("2") });
+  });
+});
+
+describe("journal units validation", () => {
+  it("rejects zero and negative units while retaining positive movement rows", () => {
+    const csv = [
+      "ref,date,type,from_account,to_account,units",
+      "J0,2026-10-01,transfer,GA,GB,0",
+      "J1,2026-10-01,transfer,GA,GB,-5",
+      "J2,2026-10-01,transfer,GA,GB,1.5",
+    ].join("\n");
+    const { entries, issues } = parseJournalCsv(csv);
+    expect(issues).toEqual([
+      { line: 2, message: "units must be greater than zero" },
+      { line: 3, message: "units must be greater than zero" },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ ref: "J2", units: parseUnits("1.5") });
+  });
+});
+
+describe("CSV escaping matrix", () => {
+  it.each([
+    ["comma", "a,b", '"a,b"'],
+    ["double quote", 'a"b', '"a""b"'],
+    ["carriage return", "a\rb", '"a\rb"'],
+    ["line feed", "a\nb", '"a\nb"'],
+    ["CRLF", "a\r\nb", '"a\r\nb"'],
+    ["leading spaces", " a", " a"],
+    ["trailing spaces", "a ", "a "],
+    ["empty string", "", ""],
+    ["null", null, ""],
+    ["undefined", undefined, ""],
+  ])("escapes %s values", (_kind, value, escaped) => {
+    expect(toCsv(["value"], [{ value }])).toBe(`value\n${escaped}\n`);
+  });
+
+  it("escapes CSV header cells by the same rules", () => {
+    const headers = ["first,name", 'say"hi', "line\nbreak"];
+    const row = { "first,name": "one", 'say"hi': "two", "line\nbreak": "three" };
+    expect(toCsv(headers, [row])).toBe('"first,name","say""hi","line\nbreak"\none,two,three\n');
+  });
+});
+
+describe("CSV trailing empty fields", () => {
+  it("preserves trailing empty cells in nonblank rows", () => {
+    expect(parseCsv("a,b,\n1,2,")).toEqual([
+      ["a", "b", ""],
+      ["1", "2", ""],
+    ]);
+  });
+
+  it("drops rows consisting solely of empty fields", () => {
+    expect(parseCsv(",\n")).toEqual([]);
+    expect(parseCsv("a,b,\n,,\n1,2,")).toEqual([
+      ["a", "b", ""],
+      ["1", "2", ""],
+    ]);
+  });
+});
+
+describe("journal column aliases", () => {
+  it("uses legacy from/to values when canonical account cells are blank", () => {
+    const csv = [
+      "ref,date,type,from,from_account,to,to_account,units",
+      "J1,2026-10-01,transfer,GA,,GB,,2",
+      "J2,2026-10-01,transfer,,GC,,GD,3",
+    ].join("\n");
+    const { entries, issues } = parseJournalCsv(csv);
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ ref: "J1", from: "GA", to: "GB", units: parseUnits("2") });
+    expect(entries[1]).toMatchObject({ ref: "J2", from: "GC", to: "GD", units: parseUnits("3") });
+  });
+
+  it.each([
+    ["from,to", "GA,GB"],
+    ["from_account,to_account", "GA,GB"],
+  ])("keeps single naming scheme %s working", (headers, accounts) => {
+    const { entries, issues } = parseJournalCsv(
+      `ref,date,type,${headers},units\nJ3,2026-10-01,transfer,${accounts},1\n`,
+    );
+    expect(issues).toEqual([]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ from: "GA", to: "GB", units: parseUnits("1") });
   });
 });
 
@@ -173,6 +472,27 @@ describe("position reconciliation", () => {
     expect(r.lines[0]!.holderIds).toEqual(["H1", "H2"]);
   });
 
+  it("excludes ignored treasury accounts from registerHolders and chainHolders (#33)", () => {
+    const holdings = replay([
+      ev("mint", 1, { to: "H", amount: u(100) }),
+      ev("mint", 2, { to: "TRE", amount: u(5) }),
+    ]);
+    const { positions, issues } = parseRegisterCsv(
+      "holder_id,account,units\nH1,H,100\nT1,TRE,5\n",
+    );
+    expect(issues).toEqual([]);
+
+    const result = reconcilePositions(holdings, positions, { ignore: ["TRE"] });
+    expect(result.summary.registerHolders).toBe(1);
+    expect(result.summary.chainHolders).toBe(1);
+    expect(result.summary.registerTotal).toBe(u(100));
+    expect(result.breaks).toEqual([]);
+
+    const unfiltered = reconcilePositions(holdings, positions);
+    expect(unfiltered.summary.registerHolders).toBe(2);
+    expect(unfiltered.summary.chainHolders).toBe(2);
+  });
+
   it("flags every kind of break", () => {
     const { positions, issues } = parseRegisterCsv(
       "Holder ID,Name,Address,Shares,Status\nH1,Ann,A,90,active\nH3,Bo,B,40,active\nH5,Di,D,3,\nH6,Ed,,2,\nH7,Bad,E,x,\n",
@@ -196,6 +516,48 @@ describe("position reconciliation", () => {
     const { positions } = parseRegisterCsv("holder_id,account,units\nH1,A,100.0000001\nH3,B,40\n");
     const r = reconcilePositions(chain, positions, { tolerance: 1n, ignore: ["C"] });
     expect(r.breaks).toEqual([]);
+  });
+
+  it("folds an incomplete holder's quantity breaks into INCOMPLETE_HISTORY", () => {
+    // A transfer with no earlier mint: X derives to -30, A to 30. One root
+    // cause — missing history — must not read as three independent breaks.
+    const partial = replay([ev("transfer", 5, { from: "X", to: "A", amount: u(30) })]);
+    expect(partial.incomplete).toEqual(["X"]);
+
+    const { positions } = parseRegisterCsv("holder_id,account,units\nH1,A,30\n");
+    const r = reconcilePositions(partial, positions);
+
+    // INCOMPLETE_HISTORY is the primary break, carrying X's quantity context.
+    const primary = r.breaks.filter((b) => !b.consequential);
+    expect(primary.map((b) => b.type)).toEqual(["INCOMPLETE_HISTORY"]);
+    expect(primary[0]).toMatchObject({
+      address: "X",
+      chainUnits: u(-30),
+      registerUnits: 0n,
+      difference: u(-30),
+    });
+
+    // No separate MISSING_IN_REGISTER for X; the supply mismatch remains but
+    // is flagged as a consequence of the missing history.
+    expect(r.breaks.some((b) => b.type === "MISSING_IN_REGISTER")).toBe(false);
+    const supply = r.breaks.find((b) => b.type === "SUPPLY_MISMATCH")!;
+    expect(supply.consequential).toBe(true);
+    expect(supply.message).toContain("incomplete history");
+
+    // A negative derived balance is an artifact, not a holder.
+    expect(r.summary.chainHolders).toBe(1);
+    expect(r.summary.chainSupply).toBe(0n);
+    // The line itself still shows the discrepancy for anyone drilling in.
+    const lineX = r.lines.find((l) => l.address === "X")!;
+    expect(lineX.matched).toBe(false);
+  });
+
+  it("keeps supply mismatches independent when every history is complete", () => {
+    const { positions } = parseRegisterCsv("holder_id,account,units\nH1,A,90\nH3,B,40\nH4,C,7\n");
+    const r = reconcilePositions(chain, positions);
+    const supply = r.breaks.find((b) => b.type === "SUPPLY_MISMATCH")!;
+    expect(supply.consequential).toBeUndefined();
+    expect(supply.message).not.toContain("incomplete");
   });
 });
 
@@ -395,6 +757,17 @@ describe("controls log", () => {
     ev("mint", 2, { to: "A", amount: u(1) }),
   ];
 
+  it("does not treat set_authorized without a flag as a freeze (#42)", () => {
+    const missingFlag = ev("set_authorized", 9, { from: "A" });
+    expect(controlEvents([missingFlag])).toEqual([]);
+    expect(replay([missingFlag]).authorized.has("A")).toBe(false);
+
+    const validFreeze = ev("set_authorized", 10, { from: "A", authorized: false });
+    const validUnfreeze = ev("set_authorized", 11, { from: "A", authorized: true });
+    expect(controlEvents([missingFlag, validFreeze, validUnfreeze]).map((record) => record.type))
+      .toEqual(["freeze", "unfreeze"]);
+  });
+
   it("ties each control to its instruction and flags the rest", () => {
     const { instructions, issues } = parseInstructionsCsv(
       [
@@ -424,6 +797,58 @@ describe("controls log", () => {
     );
     const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-02T01:00:00Z" });
     expect(log.summary.uninstructed).toBe(1);
+  });
+
+  it("folds a backdated approval into one LATE_INSTRUCTION break", () => {
+    // The freeze closes at ledger 100 (01:40); the instruction is written one
+    // minute later. One real-world action with a backdated paper trail used to
+    // surface as UNINSTRUCTED_CONTROL plus, once the window lapsed,
+    // UNEXECUTED_INSTRUCTION — two breaks for one thing.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI8,freeze,A,2026-10-01T01:41:00Z\n",
+    );
+    const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-06T12:00:00Z" });
+    expect(log.breaks).toHaveLength(1);
+    const b = log.breaks[0]!;
+    expect(b.type).toBe("LATE_INSTRUCTION");
+    expect(b.ref).toBe("I8");
+    expect(b.address).toBe("A");
+    expect(b.eventId).toBe(log.records[0]!.eventId);
+    // Consumed: not pending, not unexecuted — but the record is still not
+    // "instructed", because nothing stood behind the action when it happened.
+    expect(log.pending).toEqual([]);
+    expect(log.summary.unexecuted).toBe(0);
+    expect(log.records[0]!.instruction).toBeUndefined();
+  });
+
+  it("leaves an instruction issued beyond the window after the event as two breaks", () => {
+    // Four days after the freeze is not a backdated approval of it; both
+    // findings stand on their own.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI9,freeze,A,2026-10-05T00:00:00Z\n",
+    );
+    const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-10T00:00:00Z" });
+    expect(log.breaks.map((b) => b.type).sort()).toEqual([
+      "UNEXECUTED_INSTRUCTION",
+      "UNINSTRUCTED_CONTROL",
+    ]);
+  });
+
+  it("never lets an earlier event steal a later event's on-time instruction as late", () => {
+    const freezes = [
+      ev("set_authorized", 100, { from: "A", authorized: false }),
+      ev("set_authorized", 300, { from: "A", authorized: false }),
+    ];
+    // Issued 02:00 — after the first freeze (01:40), before the second (05:00):
+    // an on-time instruction for the second, which must win over a late
+    // pairing with the first.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI10,freeze,A,2026-10-01T02:00:00Z\n",
+    );
+    const log = buildControlsLog(freezes, instructions, { asOf: "2026-10-06T12:00:00Z" });
+    expect(log.records[1]!.instruction?.ref).toBe("I10");
+    expect(log.breaks.map((b) => b.type)).toEqual(["UNINSTRUCTED_CONTROL"]);
+    expect(log.breaks[0]!.eventId).toBe(log.records[0]!.eventId);
   });
 
   it("gives identical output for the same input on repeated calls", () => {
@@ -493,5 +918,41 @@ describe("controls log", () => {
     expect(log.records[0].type).toBe("unfreeze");
     expect(log.records[0].instruction?.ref).toBe("I10");
     expect(log.breaks).toEqual([]);
+  });
+
+  it("flags future-dated instructions as INSTRUCTION_IN_FUTURE breaks", () => {
+    const { instructions } = parseInstructionsCsv(
+      [
+        "ref,type,account,issued_at",
+        "I_FUTURE,freeze,A,2099-01-01T00:00:00Z",
+        "I_NORMAL,freeze,B,2026-10-06T00:00:00Z",
+      ].join("\n"),
+    );
+    const log = buildControlsLog([], instructions, {
+      asOf: "2026-10-06T12:00:00Z",
+    });
+    expect(log.breaks).toContainEqual(
+      expect.objectContaining({
+        type: "INSTRUCTION_IN_FUTURE",
+        severity: "medium",
+        key: "INSTRUCTION_IN_FUTURE:I_FUTURE",
+        address: "A",
+        ref: "I_FUTURE",
+      }),
+    );
+    // Normal pending instruction within window is in pending, not a future break
+    expect(log.pending.map((i) => i.ref)).toEqual(["I_NORMAL"]);
+    expect(log.breaks.filter((b) => b.type === "INSTRUCTION_IN_FUTURE")).toHaveLength(1);
+  });
+
+  it("does not pair an instruction dated after asOf with an earlier action as late", () => {
+    // The freeze closes at 01:40; the approval is written one minute later, but asOf is 01:40:30,
+    // so at asOf the approval does not exist yet. It is in the future, not a late approval.
+    const { instructions } = parseInstructionsCsv(
+      "ref,type,account,issued_at\nI11,freeze,A,2026-10-01T01:41:00Z\n",
+    );
+    const log = buildControlsLog(events.slice(1, 2), instructions, { asOf: "2026-10-01T01:40:30Z" });
+    expect(log.breaks.map((b) => b.type).sort()).toEqual(["INSTRUCTION_IN_FUTURE", "UNINSTRUCTED_CONTROL"]);
+    expect(log.pending).toEqual([]);
   });
 });

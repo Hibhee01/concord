@@ -237,6 +237,8 @@ Valid for 14 days; it is used up by the workspace created with it.
 
 ### `reset-link EMAIL`
 
+For the full dashboard deep-link format and safe token-sharing guidance, see [dashboard routes](web-routes.md#routes).
+
 Prints a link, `<CONCORD_PUBLIC_URL>/#/reset/<token>`, then a reminder line. The link is valid for
 one day and works once. It fails with `no account for EMAIL` if there is no such account. Set
 `CONCORD_PUBLIC_URL` first, or the link points at the local default address.

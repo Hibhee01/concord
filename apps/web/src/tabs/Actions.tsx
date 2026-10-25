@@ -1,3 +1,4 @@
+import { WarningList } from "../WarningList";
 import { useState } from "react";
 import { api, type Action, type AssetSummary } from "../api";
 import { BreakTable } from "../breaks";
@@ -160,9 +161,7 @@ function Detail({ asset, action, onChange }: { asset: AssetSummary; action: Acti
       )}
       {res && (
         <>
-          {res.warnings.map((w) => (
-            <Notice key={w}>{w}</Notice>
-          ))}
+          <WarningList warnings={res.warnings} />
           <Figures
             items={[
               { label: "Result", value: <StatusBadge status={action.state} /> },

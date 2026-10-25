@@ -81,6 +81,10 @@ async function main(): Promise<void> {
     case "orgs":
       table(auth.listOrgs().map((o) => ({ id: o.id, name: o.name, members: o.members, created: o.created_at })));
       break;
+    case "purge-expired":
+      if (values.json) out(auth.purgeExpired());
+      else table([auth.purgeExpired()]);
+      break;
     case "signup-code":
       console.log(auth.createSignupCode(values.note));
       break;

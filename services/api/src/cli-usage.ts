@@ -29,6 +29,7 @@ Workspace commands. Name the workspace with --org <id | exact name> or CONCORD_O
 Operator commands.
 
   orgs                             list workspaces
+  purge-expired                    remove expired identity records
   signup-code [--note TEXT]        a code that lets one new workspace be created (CONCORD_SIGNUP=code)
   reset-link EMAIL                 a one-day link for setting a new password
   org-delete ORG                   delete a workspace and everything in it

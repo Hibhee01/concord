@@ -20,6 +20,8 @@ const LABELS: Record<string, string> = {
   UNEXPECTED: "Unexpected",
   UNINSTRUCTED_CONTROL: "Uninstructed control",
   UNEXECUTED_INSTRUCTION: "Unexecuted instruction",
+  LATE_INSTRUCTION: "Late instruction",
+  INSTRUCTION_IN_FUTURE: "Instruction dated in the future",
 };
 
 function SignOff({ assetId, item, onDone }: { assetId: string; item: Break; onDone: () => void }) {

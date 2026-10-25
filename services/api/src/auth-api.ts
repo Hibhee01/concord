@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -24,6 +25,17 @@ export interface ApiOptions {
 
 const MINUTE = 60_000;
 
+/** Normalize only genuine IPs, never let a reconnecting port become a new rate-limit bucket. */
+function normalizedIp(raw: string): string | undefined {
+  const value = raw.trim();
+  if (isIP(value)) return value;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(value);
+  if (bracketed && isIP(bracketed[1] ?? "")) return bracketed[1];
+  const v4Port = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/.exec(value);
+  if (v4Port && isIP(v4Port[1] ?? "") === 4) return v4Port[1];
+  return undefined;
+}
+
 /** The address to hold rate limits against. Forwarded headers count only behind a known proxy. */
 export function clientIp(c: Context, trustProxyHops: number): string {
   if (trustProxyHops > 0) {
@@ -31,19 +43,22 @@ export function clientIp(c: Context, trustProxyHops: number): string {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    // Each trusted proxy appends the address it saw; the entry before theirs is the client.
     const seen = hops[hops.length - trustProxyHops];
-    if (seen) return seen;
+    if (seen) {
+      const address = normalizedIp(seen);
+      if (address) return address;
+    }
   }
   try {
-    return getConnInfo(c).remote.address ?? "unknown";
+    return normalizedIp(getConnInfo(c).remote.address ?? "") ?? "unknown";
   } catch {
     return "unknown";
   }
 }
 
 export async function jsonBody<T>(c: Context): Promise<T> {
-  if (!(c.req.header("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+  const mediaType = (c.req.header("content-type") ?? "").split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
     throw new Invalid("request body must be JSON");
   }
   let value: unknown;
@@ -68,6 +83,8 @@ export function sessions(auth: Auth, options: ApiOptions) {
     },
     /** Returns the session it started. */
     start(c: Context, userId: string, orgId: string): SessionInfo | undefined {
+      // Re-authentication rotates the cookie and revokes the previous session on this browser.
+      auth.endSession(getCookie(c, name));
       const token = auth.startSession(userId, orgId);
       // Strict is enough: the page shell is static and every API call is a same-origin fetch.
       setCookie(c, name, token, {
@@ -161,10 +178,11 @@ export function authRoutes(auth: Auth, options: ApiOptions): Hono {
   app.post("/signin", async (c) => {
     const input = await jsonBody<{ email: unknown; password: unknown }>(c);
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase().slice(0, 254) : "";
-    limit(`signin:${clientIp(c, options.trustProxyHops)}`, 20, 10 * MINUTE);
     const failures = `signin-failed:${email}`;
     const locked = limiter.blocked(failures, 10);
     if (locked > 0) throw new TooMany(locked);
+    // A locked email must not drain the shared IP allowance for unrelated users.
+    limit(`signin:${clientIp(c, options.trustProxyHops)}`, 20, 10 * MINUTE);
     try {
       const { userId, orgId } = await auth.signIn(email, input.password);
       limiter.clear(failures);
@@ -328,7 +346,9 @@ export function authRoutes(auth: Auth, options: ApiOptions): Hono {
       return back(c, "/");
     } catch (err) {
       if (err instanceof Conflict) return failed("google_exists");
-      if (err instanceof Rejected) return failed("google_mismatch");
+      if (err instanceof Rejected) {
+        return failed(err.message.includes("valid email address") ? "google_invalid_email" : "google_mismatch");
+      }
       if (err instanceof Forbidden) return failed(profile.emailVerified ? "signup_code" : "google_unverified");
       console.error(err);
       return failed("google_failed");

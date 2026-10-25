@@ -40,12 +40,24 @@ const SESSION_IDLE_MS = 7 * DAY;
 const INVITE_LIFE_MS = 7 * DAY;
 const RESET_LIFE_MS = DAY;
 const SEEN_EVERY_MS = 10 * 60_000;
+/** Pending invitations one workspace may hold at once. */
+const DEFAULT_MAX_INVITES = 100;
 
 const WRONG = "Wrong email or password.";
 
 function cleanEmail(input: unknown): string {
   const email = typeof input === "string" ? input.trim().toLowerCase() : "";
-  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Rejected("Enter a valid email address.");
+  const [local = "", domain = "", extra] = email.split("@");
+  const validLocal =
+    local.length <= 64 && /^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local) && !local.includes("..");
+  const labels = domain.split(".");
+  const validDomain =
+    labels.length >= 2 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label) && label.length <= 63) &&
+    /^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "");
+  if (email.length > 254 || extra !== undefined || !validLocal || !validDomain) {
+    throw new Rejected("Enter a valid email address.");
+  }
   return email;
 }
 
@@ -72,7 +84,7 @@ export class Auth {
 
   constructor(
     private readonly db: Db,
-    private readonly options: { signup: "open" | "code"; cost?: ScryptCost; now?: () => number },
+    private readonly options: { signup: "open" | "code"; cost?: ScryptCost; now?: () => number; maxInvites?: number },
   ) {
     this.cost = options.cost ?? DEFAULT_COST;
     this.now = options.now ?? (() => Date.now());
@@ -80,6 +92,17 @@ export class Auth {
 
   private iso(offsetMs = 0): string {
     return new Date(this.now() + offsetMs).toISOString();
+  }
+
+  /** Remove abandoned identity records using the same clock as session validation. */
+  purgeExpired(): { sessions: number; invites: number; tokens: number } {
+    const now = this.iso();
+    const idle = this.iso(-SESSION_IDLE_MS);
+    return this.db.tx(() => ({
+      sessions: this.db.write("DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?", now, idle),
+      invites: this.db.write("DELETE FROM invites WHERE expires_at <= ?", now),
+      tokens: this.db.write("DELETE FROM one_time_tokens WHERE expires_at <= ? OR used_at IS NOT NULL", now),
+    }));
   }
 
   // ── accounts ──────────────────────────────────────────────────────────────
@@ -300,6 +323,11 @@ export class Auth {
     return Boolean(this.db.get("SELECT 1 AS x FROM orgs WHERE id = ?", orgId));
   }
 
+  /** Cheap liveness check: do not materialize all workspace IDs on each probe. */
+  pingDb(): void {
+    this.db.get("SELECT 1");
+  }
+
   orgIds(): string[] {
     return this.db.all<{ id: string }>("SELECT id FROM orgs ORDER BY created_at").map((r) => r.id);
   }
@@ -344,10 +372,14 @@ export class Auth {
     this.db.write("DELETE FROM users WHERE id NOT IN (SELECT user_id FROM memberships)");
   }
 
-  removeMember(orgId: string, userId: string): void {
+  removeMember(orgId: string, userId: string, actorId: string): void {
     this.db.tx(() => {
       const member = this.db.get<{ role: Role }>("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?", orgId, userId);
       if (!member) throw new Rejected("That person is not in this workspace.");
+      if (actorId === userId) {
+        const count = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?", userId)?.n ?? 0;
+        if (count <= 1) throw new Rejected("You cannot leave your only workspace. Join another first.");
+      }
       if (member.role === "owner" && this.owners(orgId) === 1) {
         throw new Rejected("A workspace needs an owner. Make someone else an owner first, or delete the workspace.");
       }
@@ -391,6 +423,13 @@ export class Auth {
     this.db.tx(() => {
       // A fresh link for the same address replaces the one still pending.
       this.db.write("DELETE FROM invites WHERE org_id = ? AND email = ? AND accepted_at IS NULL", session.org.id, email);
+      const limit = this.options.maxInvites ?? DEFAULT_MAX_INVITES;
+      const count = this.db.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM invites WHERE org_id = ? AND accepted_at IS NULL AND expires_at > ?",
+        session.org.id,
+        this.iso(),
+      )?.n ?? 0;
+      if (count >= limit) throw new Rejected(`A workspace can have at most ${limit} pending invitations.`);
       this.db.insert(
         "INSERT INTO invites (id, token_hash, org_id, email, role, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         id,
@@ -505,7 +544,10 @@ export class Auth {
     if (this.userByEmail(email)) {
       throw new Conflict("An account with this email already exists. Sign in with its password, then connect Google under Settings.");
     }
-    const name = cleanName(profile.name || email.split("@")[0], "Your name");
+    // Google profile names may be longer than our local account-name limit.
+    const fallbackName = email.split("@")[0] ?? "Google user";
+    const displayName = (profile.name || fallbackName).trim().replace(/\s+/g, " ").slice(0, 80);
+    const name = cleanName(displayName || fallbackName.slice(0, 80), "Your name");
     return this.db.tx(() => {
       if (!invited) this.spendSignupCode(context.code);
       const userId = this.createUser(email, name, true);
@@ -554,13 +596,20 @@ export class Auth {
     const user = this.userByEmail(emailInput.trim().toLowerCase());
     if (!user) throw new Rejected(`no account for ${emailInput}`);
     const token = newToken();
-    this.db.insert(
-      "INSERT INTO one_time_tokens (token_hash, purpose, user_id, created_at, expires_at) VALUES (?, 'reset', ?, ?, ?)",
-      sha256(token),
-      user.id,
-      this.iso(),
-      this.iso(RESET_LIFE_MS),
-    );
+    this.db.tx(() => {
+      this.db.write(
+        "UPDATE one_time_tokens SET used_at = ? WHERE purpose = 'reset' AND user_id = ? AND used_at IS NULL",
+        this.iso(),
+        user.id,
+      );
+      this.db.insert(
+        "INSERT INTO one_time_tokens (token_hash, purpose, user_id, created_at, expires_at) VALUES (?, 'reset', ?, ?, ?)",
+        sha256(token),
+        user.id,
+        this.iso(),
+        this.iso(RESET_LIFE_MS),
+      );
+    });
     return token;
   }
 
@@ -578,7 +627,11 @@ export class Auth {
     const secret = await hashPassword(checkPassword(password, row.email), this.cost);
     this.db.tx(() => {
       if (!find()) throw new Rejected("This reset link is no longer valid.");
-      this.db.write("UPDATE one_time_tokens SET used_at = ? WHERE token_hash = ?", this.iso(), hash);
+      this.db.write(
+        "UPDATE one_time_tokens SET used_at = ? WHERE purpose = 'reset' AND user_id = ? AND used_at IS NULL",
+        this.iso(),
+        row.user_id,
+      );
       this.setCredential(row.user_id, "password", null, secret);
       this.db.write("DELETE FROM sessions WHERE user_id = ?", row.user_id);
     });

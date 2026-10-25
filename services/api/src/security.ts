@@ -69,19 +69,42 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (scheme !== "scrypt" || !salt || !hash) return false;
   const expected = Buffer.from(hash, "base64url");
   const cost = { N: Number(N), r: Number(r), p: Number(p) };
-  if (!Number.isInteger(cost.N) || !Number.isInteger(cost.r) || !Number.isInteger(cost.p)) return false;
-  const key = await derive(password, Buffer.from(salt, "base64url"), cost, expected.length);
-  return timingSafeEqual(key, expected);
+  // Stored hashes can be malformed or tampered with; never let their parameters crash sign-in.
+  if (
+    !Number.isSafeInteger(cost.N) ||
+    cost.N < 2 ** 10 ||
+    cost.N > 2 ** 17 ||
+    (cost.N & (cost.N - 1)) !== 0 ||
+    !Number.isSafeInteger(cost.r) ||
+    cost.r < 1 ||
+    cost.r > 16 ||
+    !Number.isSafeInteger(cost.p) ||
+    cost.p < 1 ||
+    cost.p > 16 ||
+    expected.length !== 32
+  ) return false;
+  const rawSalt = Buffer.from(salt, "base64url");
+  if (rawSalt.length !== 16) return false;
+  try {
+    const key = await derive(password, rawSalt, cost, expected.length);
+    return timingSafeEqual(key, expected);
+  } catch {
+    return false;
+  }
 }
 
 // ── signed values ───────────────────────────────────────────────────────────
 
 /** Signs short-lived cookie payloads so a value planted from elsewhere is refused. */
 export class Signer {
-  constructor(private readonly secret: Buffer = randomBytes(32)) {}
+  constructor(
+    private readonly secret: Buffer = randomBytes(32),
+    private readonly now: () => number = () => Date.now(),
+  ) {}
 
   seal(value: unknown): string {
-    const body = Buffer.from(JSON.stringify(value)).toString("base64url");
+    // Cookie maxAge is client-controlled. Sign expiry with the state itself.
+    const body = Buffer.from(JSON.stringify({ value, exp: this.now() + 600_000 })).toString("base64url");
     return `${body}.${createHmac("sha256", this.secret).update(body).digest("base64url")}`;
   }
 
@@ -90,7 +113,18 @@ export class Signer {
     if (!body || !mac) return undefined;
     if (!sameText(mac, createHmac("sha256", this.secret).update(body).digest("base64url"))) return undefined;
     try {
-      return JSON.parse(Buffer.from(body, "base64url").toString()) as T;
+      const payload: unknown = JSON.parse(Buffer.from(body, "base64url").toString());
+      if (
+        !payload ||
+        typeof payload !== "object" ||
+        !("exp" in payload) ||
+        typeof payload.exp !== "number" ||
+        !Number.isFinite(payload.exp) ||
+        payload.exp <= this.now() ||
+        !("value" in payload)
+      )
+        return undefined;
+      return payload.value as T;
     } catch {
       return undefined;
     }
@@ -103,13 +137,22 @@ export class Signer {
 export class RateLimiter {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
 
-  constructor(private readonly now: () => number = () => Date.now()) {
-    setInterval(() => this.sweep(), 60_000).unref();
+  // Expired windows are removed lazily, so creating a limiter does not leak an interval.
+  private lastSweepAt = 0;
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  dispose(): void {
+    this.windows.clear();
   }
 
   /** Counts one attempt. Returns 0 when allowed, else the seconds to wait. */
   hit(key: string, limit: number, windowMs: number): number {
     const at = this.now();
+    if (at - this.lastSweepAt >= 60_000) {
+      this.sweep();
+      this.lastSweepAt = at;
+    }
     let w = this.windows.get(key);
     if (!w || w.resetAt <= at) {
       if (this.windows.size > 50_000) this.sweep(true);
@@ -140,6 +183,8 @@ export class RateLimiter {
 
 export class TooMany extends Error {
   constructor(readonly retryAfter: number) {
-    super(`Too many attempts. Try again in ${retryAfter < 90 ? `${retryAfter} seconds` : `${Math.ceil(retryAfter / 60)} minutes`}.`);
+    super(
+      `Too many attempts. Try again in ${retryAfter < 90 ? `${retryAfter} seconds` : `${Math.ceil(retryAfter / 60)} minutes`}.`,
+    );
   }
 }

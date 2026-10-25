@@ -5,6 +5,7 @@ import { EphemeralNotice, Invite, Reset, SignIn, SignUp, googleError } from "./A
 import { Overview } from "./Overview";
 import { Settings } from "./Settings";
 import { SessionProvider, useMe, useSession } from "./session";
+import { focusRouteContent } from "./navigationFocus";
 import { Actions } from "./tabs/Actions";
 import { Controls } from "./tabs/Controls";
 import { Events } from "./tabs/Events";
@@ -489,6 +490,8 @@ function Boot({ error }: { error?: string | undefined }) {
 
 function Routes() {
   const route = useRoute();
+  // Hash routes otherwise preserve the previous scroll position and keyboard focus.
+  useEffect(focusRouteContent, [route.page, route.assetId, route.tab, route.token]);
   const { me } = useSession();
   const error = googleError(route.query.get("error") ?? undefined);
   if (route.page === "invite" && route.token) return <Invite key={route.token} token={route.token} />;

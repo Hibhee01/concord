@@ -29,14 +29,15 @@ value.
 | `CONCORD_HOST` | `127.0.0.1` | An address to listen on, e.g. `0.0.0.0` for all interfaces | Not checked |
 | `CONCORD_PORT` | `PORT`, then `4400` | A whole number, 1 or more | Not a whole number, or below 1 |
 | `PORT` | `4400` | As `CONCORD_PORT`. Read only when `CONCORD_PORT` is unset or empty | As `CONCORD_PORT` |
-| `CONCORD_PUBLIC_URL` | `RENDER_EXTERNAL_URL`, then `http://<host>:<port>` | An absolute URL. Only its origin is kept | Not a URL |
+| `CONCORD_PUBLIC_URL` | `RENDER_EXTERNAL_URL`, then `http://<host>:<port>` | An absolute URL with no path, query or fragment (a trailing `/` is fine) | Not a URL, or it carries a path, query or fragment |
 | `RENDER_EXTERNAL_URL` | Set by Render | As `CONCORD_PUBLIC_URL`. Read only when `CONCORD_PUBLIC_URL` is unset or empty | As `CONCORD_PUBLIC_URL` |
 | `CONCORD_TRUST_PROXY` | `0` | A whole number of proxy hops, 0 or more | Not a whole number, or below 0 |
-| `CONCORD_WEB_DIR` | `<repo>/apps/web/dist` | A directory holding the built dashboard | Not checked |
-| `CONCORD_DATA_DIR` | `<repo>/data` | A directory on a local disk | Not checked |
+| `CONCORD_WEB_DIR` | `<repo>/apps/web/dist` | A directory holding the built dashboard. A relative path is resolved against the repository root, not the working directory | Not checked |
+| `CONCORD_DATA_DIR` | `<repo>/data` | A directory on a local disk. A relative path is resolved against the repository root, not the working directory | Not checked |
 | `CONCORD_EPHEMERAL` | Off | `1` or `true` turns it on. Anything else, `TRUE` and `yes` included, leaves it off | Never |
 | `CONCORD_SIGNUP` | `open` | `open` or `code` | Anything else, including an empty value |
 | `CONCORD_MAX_ASSETS` | `10` | A whole number, 1 or more | Not a whole number, or below 1 |
+| `CONCORD_MAX_INVITES` | `100` | A whole number, 1 to 10000 | Not a whole number, or out of range |
 | `CONCORD_PASSWORD_COST` | `32768:8:3` | `N:r:p`: N a power of two from 16384 to 1048576, r from 8 to 32, p from 1 to 16 | N, r or p is missing or out of range |
 | `CONCORD_GOOGLE_CLIENT_ID` | Unset (Google sign-in off) | An OAuth client id | Only one of the pair is set |
 | `CONCORD_GOOGLE_CLIENT_SECRET` | Unset (Google sign-in off) | That client's secret | Only one of the pair is set |
@@ -58,12 +59,11 @@ An empty value (`NAME=`) does not always mean unset:
 
 - **Treated as unset:** every whole-number variable, `CONCORD_PORT` (falls through to `PORT`),
   `CONCORD_PUBLIC_URL`, the four URL lists, `CONCORD_RPC_HEADERS`, `CONCORD_PASSWORD_COST`,
-  `CONCORD_EPHEMERAL`, `CONCORD_ORG`, and the Google pair when both are empty.
-- **Used as given:** `CONCORD_HOST`, `CONCORD_DATA_DIR`, `CONCORD_WEB_DIR`, `CONCORD_SIGNUP` and
-  `CONCORD_DEFAULT_NETWORK` replace a missing value with the default, not an empty one. An empty
-  `CONCORD_SIGNUP` or `CONCORD_DEFAULT_NETWORK` is refused. An empty `CONCORD_DATA_DIR` or
-  `CONCORD_WEB_DIR` resolves to the working directory. Leave these out rather than setting
-  them empty.
+  `CONCORD_EPHEMERAL`, `CONCORD_ORG`, `CONCORD_DATA_DIR`, `CONCORD_WEB_DIR`, and the Google pair
+  when both are empty.
+- **Used as given:** `CONCORD_HOST`, `CONCORD_SIGNUP` and `CONCORD_DEFAULT_NETWORK` replace a
+  missing value with the default, not an empty one. An empty `CONCORD_SIGNUP` or
+  `CONCORD_DEFAULT_NETWORK` is refused. Leave these out rather than setting them empty.
 
 ## Details
 
@@ -73,9 +73,9 @@ An empty value (`NAME=`) does not always mean unset:
   container image sets `CONCORD_HOST=0.0.0.0` (`Dockerfile`). Hosts such as Render pass the port
   as `PORT`. The image's health check and the dashboard's dev server (`apps/web/vite.config.ts`,
   used by `pnpm dev`) read the same two port variables.
-- **`CONCORD_PUBLIC_URL`, `RENDER_EXTERNAL_URL`.** The address people open. Concord reduces it to
-  its origin, so a path such as `/concord` is dropped and Concord cannot be served under a
-  sub-path. When none is set and the host is `0.0.0.0`, the default uses `127.0.0.1` instead. The
+- **`CONCORD_PUBLIC_URL`, `RENDER_EXTERNAL_URL`.** The address people open. Concord serves from
+  the root and cannot be hosted under a sub-path, so a URL with a path such as `/concord`, a query
+  or a fragment is rejected at start-up rather than trimmed. A trailing `/` alone is accepted. When none is set and the host is `0.0.0.0`, the default uses `127.0.0.1` instead. The
   origin decides:
   - **Cookies and HSTS.** With `https://`, session cookies are marked `Secure` and named
     `__Host-…`, and the server sends `Strict-Transport-Security` (`auth-api.ts`, `main.ts`).
@@ -110,6 +110,8 @@ An empty value (`NAME=`) does not always mean unset:
   one-use code from `pnpm concord signup-code`.
 - **`CONCORD_MAX_ASSETS`.** Caps the assets one workspace may watch. It is enforced when an asset
   is watched from the dashboard or API (`api.ts`). `pnpm concord watch` does not check it.
+- **`CONCORD_MAX_INVITES`.** Caps the pending (unaccepted, unexpired) invitations one workspace may
+  hold. Creating one past the cap answers 400. Accepting or withdrawing an invitation frees a slot.
 - **`CONCORD_PASSWORD_COST`.** Sets the scrypt work factors for new password hashes. The default
   is `DEFAULT_COST` in `security.ts`. Each stored hash keeps the factors it was made with, so
   existing passwords keep working after a change.
