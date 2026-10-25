@@ -8,7 +8,7 @@ This guide covers daily issue triage, pull-request review and merge rules, relea
 
 Review new issues regularly to keep the backlog actionable and aligned with the product scope in [`BRIEF.md`](../BRIEF.md) and [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-1. **Sanitize sensitive data first:** If an issue, log excerpt, or screenshot includes real customer names, holder addresses, or session tokens, redact the content immediately per [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md#L12-L13). If a reporter posts an exploitable vulnerability in public, delete or hide the issue and direct them to private reporting ([`SECURITY.md`](../SECURITY.md#L8-L9)).
+1. **Sanitize sensitive data first:** If an issue, log excerpt, or screenshot includes real customer names, holder addresses, or session tokens, redact the content immediately per [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md). If a reporter posts an exploitable vulnerability in public, delete or hide the issue and direct them to private reporting ([`SECURITY.md`](../SECURITY.md)).
 2. **Check product boundaries:** Concord is read-only (`docs/overview.md`, `CONTRIBUTING.md#L73-L74`), runs as a single process backed by local SQLite files (`services/api/src/db.ts`), and sends no email (`docs/limits.md`). Feature requests that require holding signing keys, submitting value-moving transactions, or adding external database servers should be closed or converted into design discussions before anyone writes code.
 3. **Verify bug reports:** Confirm the report states the commit or build, the network (`mainnet` or `testnet`), and steps to reproduce using CLI commands (`pnpm concord ...`) or a minimal CSV fixture.
 4. **Apply labels:**
@@ -43,7 +43,7 @@ Before merging any pull request, verify both the automated checks in [`.github/w
 ### Merge Strategy: Squash and Conventional Commit Title
 
 - **Squash merge only:** Keep `main` linear with one self-contained commit per pull request (`CONTRIBUTING.md#L81`).
-- **Conventional Commit format:** Format the squash commit title according to [`CONTRIBUTING.md`](../CONTRIBUTING.md#L86-L96):
+- **Conventional Commit format:** Format the squash commit title according to [`CONTRIBUTING.md`](../CONTRIBUTING.md):
   - Scoped to a workspace package: `feat(core): ...`, `fix(api): ...`, `feat(web): ...`, `test(api): ...`
   - Repository-wide changes take no scope: `docs: ...`, `build: ...`, `chore: ...`
 - **Issue linkage:** Include `Closes #<issue>` in the commit body so the linked issue closes automatically when merged.
@@ -71,7 +71,7 @@ Currently, Concord tracks the latest commit on `main` (`SECURITY.md#L45`), and d
    Confirm the container starts cleanly against an existing data directory and responds `{"ok":true}` on `GET /api/health` (`services/api/src/api.ts#L81-L84`).
 4. **Version and tag (when publishing a tagged release):**
    - Update `"version"` in [`package.json`](../package.json), [`packages/core/package.json`](../packages/core/package.json), [`services/api/package.json`](../services/api/package.json), and [`apps/web/package.json`](../apps/web/package.json).
-   - Update [`SECURITY.md`](../SECURITY.md#L43-L45) if the supported-versions policy changes.
+   - Update [`SECURITY.md`](../SECURITY.md) if the supported-versions policy changes.
    - Create an annotated tag (`git tag -a vX.Y.Z -m "vX.Y.Z"`) and push the tag to the repository.
 
 ---
@@ -80,17 +80,17 @@ Currently, Concord tracks the latest commit on `main` (`SECURITY.md#L45`), and d
 
 ### Security Reports
 
-Vulnerability reports arrive via **GitHub Private Vulnerability Reporting** (`Security → Report a vulnerability`, documented in [`SECURITY.md`](../SECURITY.md#L8-L17)):
+Vulnerability reports arrive via **GitHub Private Vulnerability Reporting** (`Security → Report a vulnerability`, documented in [`SECURITY.md`](../SECURITY.md)):
 
 1. **Acknowledge within 5 working days:** Confirm receipt in the private advisory thread.
-2. **Assess and communicate plan within 10 working days:** Check the report against the in-scope areas in [`SECURITY.md`](../SECURITY.md#L19-L25) (cross-workspace data leaks in `services/api/src/tenants.ts`, auth/session bypasses in `services/api/src/auth.ts` and `auth-api.ts`, cookie/CSRF/origin checks and rate limiting in `services/api/src/security.ts`, path traversal in `services/api/src/main.ts`, or reconciliation calculation spoofing in `packages/core`).
+2. **Assess and communicate plan within 10 working days:** Check the report against the in-scope areas in [`SECURITY.md`](../SECURITY.md) (cross-workspace data leaks in `services/api/src/tenants.ts`, auth/session bypasses in `services/api/src/auth.ts` and `auth-api.ts`, cookie/CSRF/origin checks and rate limiting in `services/api/src/security.ts`, path traversal in `services/api/src/main.ts`, or reconciliation calculation spoofing in `packages/core`).
 3. **Develop the fix privately:** Use the GitHub security advisory's temporary private fork—do not open a public issue or public pull request before the patch is ready.
 4. **Include a regression test:** Add a test in `services/api/test/tenancy.test.ts`, `service.test.ts`, or `packages/core/test/core.test.ts` that reproduces the exploit and fails without the fix.
 5. **Coordinate disclosure:** Merge the fix to `main` and publish the security advisory once operators have a patched commit to deploy.
 
 ### Code of Conduct Reports
 
-Conduct reports arrive via GitHub's "Report content" feature or via a private security advisory marked as a conduct report ([`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md#L28-L35)):
+Conduct reports arrive via GitHub's "Report content" feature or via a private security advisory marked as a conduct report ([`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)):
 
 1. **Keep the reporter confidential:** Never share the reporter's identity without explicit consent.
 2. **Conflict of interest:** If a report involves a maintainer, that maintainer must recuse themselves from viewing, discussing, or acting on the report.
